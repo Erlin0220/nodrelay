@@ -10,6 +10,7 @@ const tests :Workerd.Config = (
         (name = "signed-fixture.mjs", esModule = embed "signed-fixture.mjs"),
         (name = "upgrade-artifacts.mjs", esModule = embed "../../cloud/upgrade-artifacts.mjs"),
         (name = "upgrade-plan.mjs", esModule = embed "../../cloud/upgrade-plan.mjs"),
+        (name = "upgrade-feed-migration.mjs", esModule = embed "../../cloud/upgrade-feed-migration.mjs"),
         (name = "upgrade-enrollment-release.mjs", esModule = embed "../../cloud/upgrade-enrollment-release.mjs"),
         (name = "device-paths.mjs", esModule = embed "../../cloud/device-paths.mjs"),
         (name = "enrollment-bootstrap.mjs", esModule = embed "../../cloud/enrollment-bootstrap.mjs"),
