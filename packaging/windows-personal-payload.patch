@@ -1,0 +1,81 @@
+diff --git a/personal/personal/desktop/platform.mjs b/personal/personal/desktop/platform.mjs
+index 748e53a..bf95911 100644
+--- a/personal/personal/desktop/platform.mjs
++++ b/personal/personal/desktop/platform.mjs
+@@ -102,7 +102,8 @@ export async function installRecord(home = stateHome()) {
+   await access(join(value.packageRoot, 'personal', 'bin.mjs'));
+   return value;
+ }
+-export function taskXml({ home, component, root, node, sid, codexCommand }) {
++export function taskXml({ home, component, root, node, sid, codexCommand, runLevel = 'HighestAvailable' }) {
++  if (!['LeastPrivilege', 'HighestAvailable'].includes(runLevel)) throw new Error('Invalid task run level');
+   if (!managedComponents.includes(component) || !/^S-1-5-[0-9-]+$/.test(sid)) throw new Error('Invalid desktop task identity');
+   const label = jobName(home, component);
+   const launcher = join(root, 'personal', 'bin', 'personal-launcher.exe');
+@@ -112,7 +113,7 @@ export function taskXml({ home, component, root, node, sid, codexCommand }) {
+ <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+ <RegistrationInfo><Description>PersonalDevSpace:${ownerId(home)}:${component}</Description><SecurityDescriptor>D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;${sid})</SecurityDescriptor></RegistrationInfo>
+ <Triggers>${component === 'installer' ? '' : `<LogonTrigger><Enabled>true</Enabled><UserId>${sid}</UserId></LogonTrigger>`}</Triggers>
+-<Principals><Principal id="User"><UserId>${sid}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>HighestAvailable</RunLevel></Principal></Principals>
++<Principals><Principal id="User"><UserId>${sid}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>${runLevel}</RunLevel></Principal></Principals>
+ <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><AllowHardTerminate>true</AllowHardTerminate><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><ExecutionTimeLimit>${component === 'installer' ? 'PT30M' : 'PT0S'}</ExecutionTimeLimit>${component === 'installer' ? '' : '<RestartOnFailure><Interval>PT1M</Interval><Count>3</Count></RestartOnFailure>'}</Settings>
+ <Actions Context="User"><Exec><Command>${xml(launcher)}</Command><Arguments>${xml(args.map(quoted).join(' '))}</Arguments><WorkingDirectory>${xml(root)}</WorkingDirectory></Exec></Actions></Task>\n`;
+ }
+@@ -134,6 +135,7 @@ async function createWindowsTask(home, component, contents) {
+ }
+ export async function registerDesktopEntries(home, root) {
+   if (process.platform !== 'win32') return;
++  if (!(await installedJobOptions(home)).desktopEntries) return;
+   const launcher = join(root, 'personal', 'bin', 'personal-launcher.exe');
+   const icon = join(root, 'personal', 'assets', 'personal-devspace.ico');
+   await access(launcher); await access(icon);
+@@ -155,7 +157,30 @@ foreach($folder in $folders) {
+ }
+ `, { env: { PERSONAL_LAUNCHER: launcher, PERSONAL_ARGUMENTS: argumentsText, PERSONAL_ROOT: root, PERSONAL_ICON: icon } });
+ }
+-export async function registerJobs(home, root, selected = components, { record = true } = {}) {
++export function normalizeJobOptions(stored = {}, requested = {}) {
++  for (const value of [stored, requested]) {
++    if ((Object.hasOwn(value, 'runLevel') && !['LeastPrivilege', 'HighestAvailable'].includes(value.runLevel)) ||
++        (Object.hasOwn(value, 'desktopEntries') && typeof value.desktopEntries !== 'boolean')) {
++      throw new Error('Invalid installed task options');
++    }
++  }
++  const runLevel = requested.runLevel ?? stored.runLevel ?? 'HighestAvailable';
++  const desktopEntries = requested.desktopEntries ?? stored.desktopEntries ?? true;
++  if (!['LeastPrivilege', 'HighestAvailable'].includes(runLevel) || typeof desktopEntries !== 'boolean') {
++    throw new Error('Invalid installed task options');
++  }
++  return { runLevel, desktopEntries };
++}
++async function installedJobOptions(home, requested = {}) {
++  const installed = await readJson(statePath(home, 'install'), null);
++  if (installed && (installed.schema !== 1 || installed.owner !== 'personal-devspace')) {
++    throw new Error('Invalid Personal installation ownership');
++  }
++  return normalizeJobOptions(installed ?? {}, requested);
++}
++export async function registerJobs(home, root, selected = components, { record = true, ...requested } = {}) {
++  const options = await installedJobOptions(home, requested);
++  const { runLevel } = options;
+   await secureStateDirectory(home);
+   await access(join(root, 'dist', 'server.js'));
+   await mkdir(join(home, 'logs'), { recursive: true });
+@@ -170,7 +195,7 @@ export async function registerJobs(home, root, selected = components, { record =
+     try {
+       for (const component of selected) {
+         changed.push(component);
+-        await createWindowsTask(home, component, taskXml({ home, component, root, node: process.execPath, sid, codexCommand }));
++        await createWindowsTask(home, component, taskXml({ home, component, root, node: process.execPath, sid, codexCommand, runLevel }));
+       }
+     } catch (error) {
+       const rollback = [];
+@@ -229,7 +254,7 @@ export async function registerJobs(home, root, selected = components, { record =
+       throw error;
+     }
+   }
+-  if (record) await atomicJson(statePath(home, 'install'), { schema: 1, owner: 'personal-devspace', packageRoot: resolve(root) });
++  if (record) await atomicJson(statePath(home, 'install'), { schema: 1, owner: 'personal-devspace', packageRoot: resolve(root), ...options });
+ }
+ export async function jobAction(home, component, action) {
+   if (!managedComponents.includes(component) || !['start', 'stop', 'remove'].includes(action)) throw new Error('Invalid job action');

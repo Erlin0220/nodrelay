@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node 24 on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: npm ci
+      - run: npm test
+      - name: Verify the signed upgrade feed in Cloudflare workerd
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          dir=$(mktemp -d)
+          trap 'rm -rf "$dir"' EXIT
+          npm pack --registry=https://registry.npmjs.org --ignore-scripts --pack-destination "$dir" @cloudflare/workerd-linux-64@1.20261121.1
+          archive="$dir/cloudflare-workerd-linux-64-1.20261121.1.tgz"
+          printf '%s  %s\n' '57d63e4f3f4d2a1bccfcb71ed9de634ccf59ded232e5db45a215278d4ef4b84c1a6e29d00346a496aa20dfe798975ff9429e173fb297c750eef257836e927640' "$archive" | sha512sum --check
+          tar -xzf "$archive" -C "$dir" package/bin/workerd
+          "$dir/package/bin/workerd" test test/workerd/upgrade.capnp
+      - name: Exercise the management console in Chrome against local D1
+        if: runner.os == 'Linux'
+        env:
+          WRANGLER_SEND_METRICS: 'false'
+        shell: bash
+        run: |
+          dir=$(mktemp -d)
+          trap 'rm -rf "$dir"' EXIT
+          npm install --prefix "$dir" --save-exact --ignore-scripts --no-audit --no-fund \
+            wrangler@4.98.0 miniflare@4.20260730.0 playwright@1.61.0
+          "$dir/node_modules/.bin/wrangler" deploy --dry-run \
+            --config docs/worker.wrangler.example.jsonc --outdir "$dir/bundle"
+          export FLEET_WORKER_BUNDLE="$dir/bundle/worker.js"
+          export FLEET_MINIFLARE="$(node -p 'require.resolve(process.argv[1])' "$dir/node_modules/miniflare")"
+          export FLEET_TEST_PLAYWRIGHT="$(node -p 'require.resolve(process.argv[1])' "$dir/node_modules/playwright")"
+          export FLEET_TEST_RUNTIME_OAUTH=managed
+          test -s "$FLEET_WORKER_BUNDLE"
+          test -f "$FLEET_MINIFLARE"
+          test -f "$FLEET_TEST_PLAYWRIGHT"
+          node --test test/workerd-local.mjs | tee "$dir/results"
+          grep -F 'Browser upgrade recovery passed at 1100px' "$dir/results"
+          grep -F 'Browser upgrade recovery passed at 360px' "$dir/results"
+          grep -F 'Keyboard list retry retained and restored focus' "$dir/results"
+          grep -F 'Browser durable enrollment keeps a revoked command bound to its original intent' "$dir/results"
+      - name: Check native POSIX download and archive handling
+        if: runner.os != 'Windows'
+        env:
+          FLEET_TEST_BOOTSTRAP: 1
+        run: node --test test/bootstrap-local.mjs
+      - name: Execute the generated Windows installer in PowerShell
+        if: runner.os == 'Linux'
+        shell: pwsh
+        env:
+          FLEET_TEST_BOOTSTRAP: 1
+        run: |
+          $env:FLEET_TEST_PWSH = Get-Command pwsh -CommandType Application -ErrorAction Stop | Select-Object -First 1 -ExpandProperty Source
+          node --test --test-name-pattern='the Windows command executes' test/bootstrap-local.mjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Exercise the pinned bootstrap on Windows PowerShell
+        if: runner.os == 'Windows'
+        shell: powershell
+        env:
+          FLEET_TEST_WINDOWS_BOOTSTRAP: 1
+        run: node --test test/windows-bootstrap-local.mjs
+      - name: Verify actual Windows ACL handling
+        if: runner.os == 'Windows'
+        env:
+          FLEET_TEST_WINDOWS_ACL: 1
+        run: node --test test/windows-acl-local.mjs
+      - name: Check the macOS management archive
+        if: runner.os == 'macOS'
+        env:
+          FLEET_TEST_MANAGEMENT_KIT: 1
+        run: node --test test/management-kit-local.mjs

@@ -1,0 +1,7 @@
+{
+  "namespace": "my-fleet",
+  "ownerEmail": "owner@example.invalid",
+  "oauthClientId": "PRODUCT_REGISTERED_PUBLIC_OAUTH_CLIENT",
+  "oauthRedirect": "http://127.0.0.1:18372/oauth/callback",
+  "releaseManifest": "./release/release.json"
+}

@@ -1,0 +1,9 @@
+{
+  "accountId": "00000000000000000000000000000000",
+  "namespace": "nodrelay",
+  "oauthRedirect": "http://127.0.0.1:18871/oauth/callback",
+  "oauthPublisher": {
+    "url": "https://publisher.example.invalid/nodrelay",
+    "logo": "https://publisher.example.invalid/nodrelay/logo.png"
+  }
+}

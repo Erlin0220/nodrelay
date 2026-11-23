@@ -1,0 +1,24 @@
+{
+  "name": "nodrelay",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node src/device.mjs",
+    "test": "node --test test/*.test.mjs",
+    "test:runtime": "node --test test/runtime.mjs",
+    "enroll": "node src/enroll.mjs",
+    "setup": "node src/setup.mjs",
+    "pack:device": "node packaging/pack.mjs",
+    "pack:release": "node packaging/release.mjs"
+  },
+  "dependencies": {
+    "@clack/prompts": "1.9.0",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "jose": "6.2.13"
+  }
+}

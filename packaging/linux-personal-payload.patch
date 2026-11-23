@@ -1,0 +1,13 @@
+--- a/personal/personal/desktop/platform.mjs
++++ b/personal/personal/desktop/platform.mjs
+@@ -216,8 +216,9 @@
+       const previous = await readFile(path, 'utf8').catch(error => { if (error.code === 'ENOENT') return ''; throw error; });
+       if (previous && !previous.includes(`PersonalDevSpace:${ownerId(home)}`)) throw new Error('Unknown systemd unit owner');
+       const q = value => `"${String(value).replace(/([\\"])/g, '\\$1').replace(/%/g, '%%')}"`;
++      const unitValue = value => String(value).replaceAll('%', '%%');
+       const environment = managedEnvironment(home, component, codexCommand).map(([key, value]) => `Environment=${q(`${key}=${value}`)}\n`).join('');
+-      const contents = `[Unit]\nDescription=PersonalDevSpace:${ownerId(home)} ${component}\n[Service]\nType=simple\nWorkingDirectory=${q(root)}\n${environment}ExecStart=${q(process.execPath)} ${q(join(root, 'personal/bin.mjs'))} ${component}\nStandardOutput=${q('append:' + join(home, 'logs', `${component}.log`))}\nStandardError=${q('append:' + join(home, 'logs', `${component}.error.log`))}\nKillMode=control-group\n[Install]\nWantedBy=default.target\n`;
++      const contents = `[Unit]\nDescription=PersonalDevSpace:${ownerId(home)} ${component}\n[Service]\nType=simple\nWorkingDirectory=${unitValue(root)}\n${environment}ExecStart=${q(process.execPath)} ${q(join(root, 'personal/bin.mjs'))} ${component}\nStandardOutput=append:${unitValue(join(home, 'logs', `${component}.log`))}\nStandardError=append:${unitValue(join(home, 'logs', `${component}.error.log`))}\nKillMode=control-group\n[Install]\nWantedBy=default.target\n`;
+       const unit = `${jobName(home, component)}.service`;
+       const enabled = previous ? await native('systemctl', ['--user', 'is-enabled', unit]).then(() => true, error => {
+         if ([1, 4].includes(error.code)) return false; throw error;

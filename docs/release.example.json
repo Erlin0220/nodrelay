@@ -1,0 +1,16 @@
+{
+  "version": "1.0.0",
+  "workerBundle": "/absolute/build/worker.js",
+  "downloadBase": "https://releases.example.invalid/devspace-fleet/1.0.0/",
+  "platforms": {
+    "macos-arm64": {
+      "node": "/absolute/approved/macos-arm64/node",
+      "nodeSha256": "SET_TO_APPROVED_NODE_SHA256",
+      "nodeLicense": "/absolute/approved/node-LICENSE",
+      "cloudflared": "/absolute/approved/macos-arm64/cloudflared",
+      "cloudflaredSha256": "SET_TO_APPROVED_CLOUDFLARED_SHA256",
+      "cloudflaredLicense": "/absolute/approved/cloudflared-LICENSE",
+      "personal": "/absolute/built/personal-macos-arm64"
+    }
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "deviceId": "mac-mini",
+  "profile": "probe",
+  "port": 7829,
+  "portalTokenFile": "/absolute/private/fleet/portal.token",
+  "backend": {
+    "url": "http://127.0.0.1:7830/mcp",
+    "tokenFile": "/absolute/private/runtime/auth.json",
+    "tokenKey": "apiToken"
+  },
+  "probeDirectory": "/absolute/isolated/acceptance-project"
+}

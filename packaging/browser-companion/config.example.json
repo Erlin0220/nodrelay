@@ -1,0 +1,7 @@
+{
+  "schema": 1,
+  "purpose": "nodrelay-browser-only",
+  "serverName": "name-from-the-approved-local-browser-provider",
+  "url": "http://127.0.0.1:7841/mcp",
+  "tokenFile": "/absolute/private/browser-provider.token"
+}
