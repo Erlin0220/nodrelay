@@ -13,7 +13,7 @@ const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const id = /^[a-f0-9]{32}$/;
 const sha256 = /^[a-f0-9]{64}$/;
 const worker = /^fleet-[a-z][a-z0-9-]{2,15}-[a-f0-9]{12}$/;
-const phases = new Set(['uploading', 'staged', 'deploying', 'confirmed']);
+const phases = new Set(['uploading', 'staged', 'deploying', 'confirmed', 'abandoned']);
 const matches = (pattern, value) => typeof value === 'string' && pattern.test(value);
 
 const errors = {
@@ -75,7 +75,7 @@ function safeRecord(row) {
   if (row === undefined) return { phase: 'idle' };
   if (!phases.has(row?.phase) || !matches(operationUuid, row.operationId) ||
       !matches(versionPattern, row.releaseVersion) || !matches(sha256, row.releaseSha256) ||
-      !matches(uuid, row.baseVersion) || (row.phase !== 'uploading' && !matches(uuid, row.candidateVersion))) {
+      !matches(uuid, row.baseVersion) || (!['uploading', 'abandoned'].includes(row.phase) && !matches(uuid, row.candidateVersion))) {
     throw new UpgradeAdminError('status_unavailable');
   }
   if (row.manifestSha256 !== undefined && !matches(sha256, row.manifestSha256)) throw new UpgradeAdminError('status_unavailable');
@@ -160,7 +160,7 @@ export function createUpgradeAdmin(env, {
         }
         if (stored.phase === 'confirmed') return { status: 'previously_confirmed', version: stored.version, operationId: stored.operationId };
         return await confirmOperation({ expected: { ...config.target, currentVersion: config.currentVersion, activeVersion: record.baseVersion },
-          operationId: stored.operationId, api: (await ownerAdapter()).api, journal: createJournal(env.TICKETS) });
+          operationId: stored.operationId, api: (await ownerAdapter()).api, journal: createJournal(env.TICKETS), now: clock });
       } catch (error) { throw mapError(error); }
     },
     async start(input) {
@@ -183,7 +183,7 @@ export function createUpgradeAdmin(env, {
       if (previous.phase === 'confirmed' && previous.operationId === operationId) {
         return { status: 'previously_confirmed', version, operationId };
       }
-      if (previous.phase !== 'idle' && previous.phase !== 'confirmed') throw new UpgradeAdminError('reconciliation_required');
+      if (!['idle', 'confirmed', 'abandoned'].includes(previous.phase)) throw new UpgradeAdminError('reconciliation_required');
       const { release, artifact, manifestSha256: verifiedDigest } = await artifacts();
       if (release.version !== version || (verifiedDigest ? verifiedDigest !== manifestSha256 :
           manifestSha256 !== undefined || release.workerSha256 !== releaseSha256)) throw new UpgradeAdminError('release_changed');

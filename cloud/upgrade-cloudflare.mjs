@@ -179,27 +179,45 @@ export function createCloudflareUpgradeAdapter(api, target, { baseline = false, 
     },
     async uploadVersion(input, options) {
       assertTarget(input);
-      if (!keysOnly(options, ['bundle', 'module', 'bindingsInherit', 'bindings', 'compatibilityDate', 'compatibilityFlags',
-        'usageModel', 'operationId']) || options.module !== 'worker.js' || options.bindingsInherit !== 'strict' ||
-        !matches(operationUuid, options.operationId) || !(options.bundle instanceof Uint8Array) ||
-        options.bundle.length < 1 || options.bundle.length > maxWorkerBytes ||
-        !matches(/^\d{4}-\d{2}-\d{2}$/, options.compatibilityDate) || !Array.isArray(options.compatibilityFlags) ||
-        options.compatibilityFlags.some(flag => !matches(/^[a-z0-9_]{1,100}$/, flag)) ||
-        new Set(options.compatibilityFlags).size !== options.compatibilityFlags.length || !usage.has(options.usageModel)) {
-        reject('Invalid staged Cloudflare Worker upload input');
+      let metadata;
+      try {
+        if (!keysOnly(options, ['bundle', 'module', 'bindingsInherit', 'bindings', 'compatibilityDate', 'compatibilityFlags',
+          'usageModel', 'operationId']) || options.module !== 'worker.js' || options.bindingsInherit !== 'strict' ||
+          !matches(operationUuid, options.operationId) || !(options.bundle instanceof Uint8Array) ||
+          options.bundle.length < 1 || options.bundle.length > maxWorkerBytes ||
+          !matches(/^\d{4}-\d{2}-\d{2}$/, options.compatibilityDate) || !Array.isArray(options.compatibilityFlags) ||
+          options.compatibilityFlags.some(flag => !matches(/^[a-z0-9_]{1,100}$/, flag)) ||
+          new Set(options.compatibilityFlags).size !== options.compatibilityFlags.length || !usage.has(options.usageModel)) {
+          reject('Invalid staged Cloudflare Worker upload input');
+        }
+        metadata = JSON.stringify({ main_module: 'worker.js',
+          compatibility_date: options.compatibilityDate, compatibility_flags: options.compatibilityFlags,
+          usage_model: options.usageModel, bindings: rolloutBindings(options.bindings, baseline === true, enrollment === true),
+          annotations: { 'workers/tag': options.operationId },
+        });
+      } catch (error) {
+        // Rejected before any request: Cloudflare never received this upload.
+        throw Object.assign(error, { notSent: true });
       }
       const body = new FormData();
-      body.set('metadata', new Blob([JSON.stringify({ main_module: 'worker.js',
-        compatibility_date: options.compatibilityDate, compatibility_flags: options.compatibilityFlags,
-        usage_model: options.usageModel, bindings: rolloutBindings(options.bindings, baseline === true, enrollment === true),
-        annotations: { 'workers/tag': options.operationId },
-      })], { type: 'application/json' }));
+      body.set('metadata', new Blob([metadata], { type: 'application/json' }));
       body.set('worker.js', new Blob([options.bundle.slice()], { type: 'application/javascript+module' }), 'worker.js');
       const receipt = await api.post(script + '/versions?bindings_inherit=strict', body);
       if (!matches(uuid, receipt?.id) || !etag(receipt.resources?.script?.etag) || receipt.exports_reconciliation !== undefined) {
         reject('Cloudflare did not confirm a code-only staged Worker version');
       }
       return { id: receipt.id, etag: receipt.resources.script.etag };
+    },
+    // Versions this Worker has that carry an upgrade operation's tag. Every
+    // upload sets the tag, so this shows whether an unconfirmed upload landed.
+    async taggedVersions(input, tag) {
+      assertTarget(input);
+      if (!matches(operationUuid, tag)) reject('Invalid Cloudflare upgrade operation tag');
+      const listed = await api.get(script + '/versions', { page: 1, per_page: 20 });
+      if (!Array.isArray(listed?.items) || listed.items.some(item => !matches(uuid, item?.id))) {
+        reject('Cloudflare did not list the Worker versions');
+      }
+      return listed.items.filter(item => item.annotations?.['workers/tag'] === tag).map(item => item.id);
     },
     async deployVersion(input, options) {
       assertTarget(input);

@@ -415,7 +415,16 @@ export const consoleUpgradeScript = String.raw`
       const result = await post('/admin/upgrade/reconcile', { operationId });
       if (result.operationId && result.operationId !== operationId) throw new Error('核对结果不属于本次升级。请先查看升级记录。');
       if (result.status === 'baseline_active_upload_unconfirmed') {
-        upgradeStatus.textContent = 'Cloudflare 流量仍指向旧版，上传结果无法确认。本次核对没有重新上传或切换。请保留记录，不要重新提交。';
+        const after = Number.isSafeInteger(result.retryAfter) ? new Date(result.retryAfter).toLocaleTimeString() : '';
+        upgradeStatus.textContent = 'Cloudflare 流量仍指向旧版，上传结果无法确认。本次核对没有重新上传或切换。' +
+          (after ? '如果到 ' + after + ' 仍没有出现这次上传的版本，再核对一次即可关闭记录并重新升级。' : '请保留记录，不要重新提交。');
+        return;
+      }
+      if (result.status === 'upload_abandoned') {
+        // The journal now reads as settled: reopening the dialog offers the release again.
+        upgradeStatus.textContent = '已确认上次上传没有到达 Cloudflare，记录已关闭。关闭此窗口后重新打开，即可重新升级。';
+        pendingUpgrade = undefined;
+        hideUpgradeAction(reconcileUpgrade);
         return;
       }
       if (result.status === 'baseline_active_candidate_staged') {

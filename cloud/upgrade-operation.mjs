@@ -1,8 +1,32 @@
 import { validateUpgradeBindings, validateUpgradePreconditions, verifyUpgradeRelease } from './upgrade-plan.mjs';
 import { planEnrollmentUpgrade } from './upgrade-enrollment-release.mjs';
+import { CloudflareError, CloudflareRequestTimeoutError } from './cloudflare.mjs';
 
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
 const operationUuid = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
+// An upload whose reply was lost could in principle still be applied by
+// Cloudflare. After this long with no version carrying its tag, it has not.
+export const uploadSettleMs = 15 * 60 * 1000;
+
+// What is known about a failed upload, without provider response text.
+function uploadFailure(error) {
+  if (error?.notSent === true) return { kind: 'not_sent', reason: String(error.message).slice(0, 160) };
+  if (error instanceof CloudflareError) {
+    const codes = (Array.isArray(error.codes) ? error.codes : []).filter(Number.isInteger).slice(0, 5);
+    // A definite 4xx answer is Cloudflare refusing the upload, so no version was created.
+    const refused = error.status >= 400 && error.status < 500 && ![408, 409, 429].includes(error.status);
+    return { kind: refused ? 'refused' : 'unknown', status: error.status, codes };
+  }
+  if (error instanceof CloudflareRequestTimeoutError) return { kind: 'timeout' };
+  return { kind: 'unknown' };
+}
+
+function failureText(failure) {
+  if (failure.kind === 'not_sent') return `the upload was not sent: ${failure.reason}`;
+  if (failure.kind === 'timeout') return 'the request timed out';
+  if (Number.isInteger(failure.status)) return `Cloudflare answered HTTP ${failure.status}${failure.codes.length ? ', codes ' + failure.codes.join(', ') : ''}`;
+  return 'the reply was lost';
+}
 
 export class UpgradeOperationError extends Error {
   constructor(code, message) {
@@ -105,7 +129,8 @@ export async function runUpgradeOperation({ expected, artifact, operationId, api
       }
       return { status: 'previously_confirmed', version: release.version, versionId: previous.candidateVersion };
     }
-    if (previous && previous.phase !== 'confirmed') {
+    // An abandoned upload was proven never to have reached Cloudflare.
+    if (previous && !['confirmed', 'abandoned'].includes(previous.phase)) {
       throw new UpgradeOperationError('reconciliation_required', 'An earlier upgrade is unsettled. Check Cloudflare before submitting another upgrade');
     }
 
@@ -150,14 +175,19 @@ export async function runUpgradeOperation({ expected, artifact, operationId, api
     // A failed or ambiguous POST is never retried, including when an HTTP
     // request is resubmitted or the Worker has been restarted.
     await assertStable(target.activeVersion);
-    await txn.write({ ...record, phase: 'uploading' });
+    const uploading = { ...record, phase: 'uploading', uploadStartedAt: now };
+    await txn.write(uploading);
     let uploaded;
     try {
       uploaded = await api.uploadVersion(target, { bundle, module: 'worker.js', bindingsInherit: 'strict',
         bindings, compatibilityDate: runtime.compatibilityDate, compatibilityFlags: runtime.compatibilityFlags,
         usageModel: runtime.usageModel, operationId });
-    } catch {
-      throw new UpgradeOperationError('upload_unconfirmed', 'Cloudflare staging was not confirmed. No rollout was attempted; check Cloudflare before retrying');
+    } catch (error) {
+      const failure = uploadFailure(error);
+      // Keep what is known, so a later check can settle the record safely.
+      await txn.write({ ...uploading, uploadFailure: failure }).catch(() => {});
+      throw Object.assign(new UpgradeOperationError('upload_unconfirmed',
+        `Cloudflare staging was not confirmed (${failureText(failure)}). No rollout was attempted; check Cloudflare before retrying`), { failure });
     }
     if (!uploaded || typeof uploaded.id !== 'string' || !uuid.test(uploaded.id) ||
         uploaded.id === target.activeVersion || !validEtag(uploaded.etag)) {
@@ -204,11 +234,14 @@ export async function runUpgradeOperation({ expected, artifact, operationId, api
 // Read provider truth for interrupted uploads or cutovers. Pre-cutover checks
 // never clear the journal; a GET cannot prove an ambiguous upload won't arrive.
 // Never uploads, switches traffic, or rolls back.
-export async function confirmRecordedDeployment({ expected, operationId, api, journal }) {
+export async function confirmRecordedDeployment({ expected, operationId, api, journal, now = Date.now }) {
   const target = pinnedTarget(expected, operationId);
   return journal.withLock(target, async txn => {
     const record = await txn.read();
     const phase = record?.phase;
+    if (phase === 'abandoned' && record.operationId === operationId) {
+      return { status: 'upload_abandoned', version: record.releaseVersion, operationId };
+    }
     if (record?.operationId !== operationId || !['uploading', 'staged', 'deploying', 'confirmed'].includes(phase) ||
         !uuid.test(record.baseVersion ?? '') || record.baseVersion !== target.activeVersion ||
         (phase === 'uploading' ? record.candidateVersion !== undefined || record.candidateEtag !== undefined :
@@ -227,7 +260,34 @@ export async function confirmRecordedDeployment({ expected, operationId, api, jo
       requireDeployment(deployment, record.baseVersion, deployment.latestVersion);
       requireDeployment(await api.readDeployment(target), record.baseVersion, deployment.latestVersion);
       await txn.assertHeld();
-      return { status: 'baseline_active_upload_unconfirmed', version: record.releaseVersion, operationId };
+      const unconfirmed = extra => ({ status: 'baseline_active_upload_unconfirmed', version: record.releaseVersion, operationId, ...extra });
+      if (typeof api.taggedVersions !== 'function') return unconfirmed();
+      const tagged = await api.taggedVersions(target, operationId);
+      if (tagged.length > 1) throw new UpgradeOperationError('candidate_unproven', 'Cloudflare lists several versions for one upgrade');
+      if (tagged.length === 1) {
+        // The upload did land: record the exact candidate for the usual checks.
+        const landed = await api.readVersion(target, tagged[0]);
+        if (landed?.id !== tagged[0] || landed.id === record.baseVersion || !validEtag(landed.etag)) {
+          throw new UpgradeOperationError('candidate_unproven', 'Cloudflare did not identify the uploaded version');
+        }
+        await txn.write({ ...record, phase: 'staged', candidateVersion: landed.id, candidateEtag: landed.etag });
+        return { status: 'baseline_active_candidate_staged', version: record.releaseVersion, operationId };
+      }
+      if (deployment.latestVersion !== record.baseVersion) return unconfirmed();
+      // No version carries this upgrade's tag and nothing newer was uploaded.
+      // A refused or unsent upload is settled at once; a lost reply after the
+      // settle time. Records written before uploadStartedAt existed start
+      // their wait at the first check.
+      const clock = now();
+      const since = Number.isSafeInteger(record.uploadStartedAt) ? record.uploadStartedAt
+        : Number.isSafeInteger(record.uploadCheckedAt) ? record.uploadCheckedAt : undefined;
+      const definite = ['refused', 'not_sent'].includes(record.uploadFailure?.kind);
+      if (definite || (since !== undefined && clock - since >= uploadSettleMs)) {
+        await txn.write({ ...record, phase: 'abandoned', abandonedAt: clock });
+        return { status: 'upload_abandoned', version: record.releaseVersion, operationId };
+      }
+      if (since === undefined) await txn.write({ ...record, uploadCheckedAt: clock });
+      return unconfirmed({ retryAfter: (since ?? clock) + uploadSettleMs });
     }
     const [deployment, original, candidate] = await Promise.all([
       api.readDeployment(target), api.readVersion(target, record.baseVersion), api.readVersion(target, record.candidateVersion),
