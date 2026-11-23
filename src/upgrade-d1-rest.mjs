@@ -30,7 +30,7 @@ export function createUpgradeD1Rest(api, { accountId, databaseId } = {}) {
           return statement(params.map(String));
         },
         async first() {
-          if (!['SELECT', 'INSERT', 'UPDATE'].includes(mode)) throw new Error('Invalid first-row upgrade D1 statement');
+          if (mode !== 'SELECT') throw new Error('Invalid first-row upgrade D1 statement');
           return (await invoke(values)).results[0] ?? null;
         },
         async all() {
@@ -38,20 +38,21 @@ export function createUpgradeD1Rest(api, { accountId, databaseId } = {}) {
           return invoke(values);
         },
         async run() {
-          if (mode !== 'DELETE') throw new Error('Invalid cleanup upgrade D1 statement');
+          if (mode === 'SELECT') throw new Error('Invalid write upgrade D1 statement');
           return invoke(values);
         },
       });
       async function invoke(params) {
         const result = await api.post(path, { sql, params: [...params] });
-        if (!Array.isArray(result) || result.length !== 1 || result[0]?.success !== true ||
-            !Array.isArray(result[0].results) || !result[0].results.every(isObject) ||
-            (result[0].meta !== undefined && !isObject(result[0].meta))) {
+        const entry = Array.isArray(result) && result.length === 1 ? result[0] : undefined;
+        const rows = entry?.results;
+        const validRows = Array.isArray(rows) ? rows.every(isObject) : mode !== 'SELECT' && rows == null;
+        if (entry?.success !== true || !validRows || (entry.meta !== undefined && !isObject(entry.meta))) {
           throw new Error('Cloudflare 未确认升级数据操作；请核对状态，不要重复提交。');
         }
         // Only the minimal D1 contract needed by the shared coordinator.
-        const { results, meta } = result[0];
-        return { success: true, results, ...(meta !== undefined && { meta }) };
+        const { meta } = entry;
+        return { success: true, results: rows ?? [], ...(meta !== undefined && { meta }) };
       }
       return statement([]);
     },

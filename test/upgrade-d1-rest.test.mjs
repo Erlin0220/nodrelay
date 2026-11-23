@@ -46,7 +46,7 @@ test('invalid target, SQL, bindings or mismatched method stop before any D1 prov
     assert.throws(() => db.prepare('SELECT ?').bind(value), /parameters/);
   }
   await assert.rejects(db.prepare('UPDATE fleet_leases SET expires_at = 1').all(), /read-only/);
-  await assert.rejects(db.prepare('SELECT 1').run(), /cleanup/);
+  await assert.rejects(db.prepare('SELECT 1').run(), /write upgrade/);
   await assert.rejects(db.prepare('DELETE FROM fleet_leases').first(), /first-row/);
   assert.equal(submitted, false);
 });
@@ -75,7 +75,10 @@ test('CLI REST transport and Worker binding share the real SQLite lease and jour
   } };
   const db = createUpgradeD1Rest({ async post(path, { sql, params }) {
     assert.equal(path, endpoint);
-    return [{ success: true, results: sqlite.prepare(sql).all(...params) }];
+    if (sql.trimStart().startsWith('SELECT')) return [{ success: true, results: sqlite.prepare(sql).all(...params) }];
+    const { changes } = sqlite.prepare(sql).run(...params);
+    // Live D1 REST responses need not return rows for write statements.
+    return [{ success: true, ...(sql.startsWith('DELETE') && { results: [] }), meta: { changes } }];
   } }, target);
   const cli = createUpgradeJournal(db), browser = createUpgradeJournal(native);
   const record = { phase: 'uploading', target: 'fixture' };
@@ -84,12 +87,66 @@ test('CLI REST transport and Worker binding share the real SQLite lease and jour
     await txn.assertHeld();
     await txn.write(record);
     assert.deepEqual(await txn.read(), record);
-    await assert.rejects(browser.withLock(target, async () => assert.fail('browser took a live CLI lease')), /已有管理操作/);
+    await assert.rejects(browser.withLock(target, async () => assert.fail('browser took a live CLI lease')), { code: 'management_lock_busy' });
   });
   await browser.withLock(target, async txn => {
     assert.deepEqual(await txn.read(), record);
-    await assert.rejects(cli.withLock(target, async () => assert.fail('CLI took a live browser lease')), /已有管理操作/);
+    await assert.rejects(cli.withLock(target, async () => assert.fail('CLI took a live browser lease')), { code: 'management_lock_busy' });
     await txn.write({ ...record, phase: 'confirmed' });
   });
   await cli.withLock(target, async txn => assert.deepEqual(await txn.read(), { ...record, phase: 'confirmed' }));
+});
+
+test('an unconfirmed lease fails closed, releases only its own write, and never calls the upgrade body', async t => {
+  const sqlite = new DatabaseSync(':memory:');
+  t.after(() => sqlite.close());
+  sqlite.exec('CREATE TABLE fleet_leases (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, expires_at INTEGER NOT NULL)');
+  let fault = 'readback_missing';
+  const db = createUpgradeD1Rest({ async post(_path, { sql, params }) {
+    if (sql.startsWith('SELECT')) {
+      if (fault === 'readback_missing') return [{ success: true, results: [] }];
+      return [{ success: true, results: sqlite.prepare(sql).all(...params) }];
+    }
+    const { changes } = sqlite.prepare(sql).run(...params);
+    if (fault === 'lost_ack' && sql.startsWith('INSERT')) throw new Error('reply lost');
+    return [{ success: true, results: null, meta: { changes } }];
+  } }, target);
+  const journal = createUpgradeJournal(db);
+  await assert.rejects(journal.withLock(target, () => assert.fail('upgrade must not start')), error => {
+    assert.equal(error.code, 'management_lock_unconfirmed');
+    assert.deepEqual(error.diagnostic, { stage: 'acquire', ownership: 'missing', changes: 1, rows: 0 });
+    return true;
+  });
+  assert.equal(sqlite.prepare('SELECT count(*) AS n FROM fleet_leases').get().n, 0);
+  fault = 'lost_ack';
+  await assert.rejects(journal.withLock(target, () => assert.fail('upgrade must not start')), {
+    code: 'management_lock_unconfirmed',
+  });
+  assert.equal(sqlite.prepare('SELECT count(*) AS n FROM fleet_leases').get().n, 0);
+  fault = null;
+  sqlite.prepare('INSERT INTO fleet_leases VALUES (1, ?, unixepoch() + 90)').run('other-worker');
+  await assert.rejects(journal.withLock(target, () => assert.fail('upgrade must not start')), {
+    code: 'management_lock_busy',
+  });
+  assert.equal(sqlite.prepare('SELECT owner FROM fleet_leases WHERE id = 1').get().owner, 'other-worker');
+});
+
+test('a REST success without a persisted journal write cannot authorize an external operation', async t => {
+  const sqlite = new DatabaseSync(':memory:');
+  t.after(() => sqlite.close());
+  sqlite.exec('CREATE TABLE fleet_leases (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, expires_at INTEGER NOT NULL)');
+  sqlite.exec(await readFile(new URL('../cloud/0005_upgrade_journal.sql', import.meta.url), 'utf8'));
+  const db = createUpgradeD1Rest({ async post(_path, { sql, params }) {
+    if (sql.startsWith('SELECT')) return [{ success: true, results: sqlite.prepare(sql).all(...params) }];
+    if (sql.startsWith('INSERT INTO management_upgrade_journal')) {
+      return [{ success: true, results: [], meta: { changes: 1 } }];
+    }
+    const { changes } = sqlite.prepare(sql).run(...params);
+    return [{ success: true, results: [], meta: { changes } }];
+  } }, target);
+  await assert.rejects(createUpgradeJournal(db).withLock(target, async txn => {
+    await txn.write({ phase: 'uploading' });
+    assert.fail('must not continue without an exact durable record');
+  }), { code: 'management_journal_unconfirmed' });
+  assert.equal(sqlite.prepare('SELECT count(*) AS n FROM fleet_leases').get().n, 0);
 });

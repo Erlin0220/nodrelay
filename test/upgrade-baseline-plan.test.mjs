@@ -140,7 +140,10 @@ async function bridgeFixture(t, behavior = {}) {
         // Real SQLite for idempotent DDL, D1 owner lease and parameter binding.
         if (body.sql.trim().startsWith('CREATE TABLE')) { db.exec(body.sql); return [{ success: true, results: [] }]; }
         const query = db.prepare(body.sql);
-        if (body.sql.startsWith('DELETE')) { query.run(...body.params); return [{ success: true, results: [] }]; }
+        if (/^(?:INSERT|UPDATE|DELETE)\b/.test(body.sql)) {
+          const { changes } = query.run(...body.params);
+          return [{ success: true, results: [], meta: { changes } }];
+        }
         return [{ success: true, results: query.all(...body.params) }];
       }
       writes.push(path);
@@ -200,7 +203,7 @@ test('misconfigured candidate never cuts traffic, and a lost deployment receipt 
 test('an existing D1 lease prevents the bridge from publishing anything', async t => {
   const fixture = await bridgeFixture(t);
   fixture.db.prepare('INSERT INTO fleet_leases VALUES (1, ?, ?)').run('someone-else', Math.floor(Date.now()/1000) + 90);
-  await assert.rejects(fixture.run(), /已有管理操作/);
+  await assert.rejects(fixture.run(), { code: 'management_lock_busy' });
   assert.deepEqual(fixture.writes, []);
   assert.equal(fixture.state(), undefined);
 });

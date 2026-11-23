@@ -32,7 +32,7 @@ const stage = await mkdtemp(join(tmpdir(), 'nodrelay-management-kit-'));
 const kit = join(stage, 'kit');
 const files = [
   'packaging/setup-macos.sh', 'packaging/pinned-node.sh',
-  'src/management-setup.mjs', 'src/management-terminal.mjs', 'src/management-lock.mjs',
+  'src/management-setup.mjs', 'src/management-terminal.mjs', 'src/management-lock.mjs', 'src/management-diagnostics.mjs',
   'src/portal-readiness.mjs', 'src/management-release.mjs', 'src/management-onboarding.mjs', 'src/cloudflare-oauth.mjs', 'src/management-sso.mjs',
   'src/management-upgrade-baseline.mjs', 'cloud/upgrade-baseline-plan.mjs', 'cloud/upgrade-plan.mjs', 'cloud/upgrade-cloudflare.mjs', 'cloud/enrollment-bootstrap.mjs', 'cloud/upgrade-enrollment-release.mjs',
   'src/management-command-upgrade.mjs', 'src/upgrade-d1-rest.mjs', 'cloud/upgrade-artifacts.mjs',

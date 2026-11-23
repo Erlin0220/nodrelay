@@ -22,7 +22,7 @@ test('persists pre-write journal across executions and release, serializing agai
   assert.equal(await readUpgradeJournal(d1, target), undefined);
   await journal.withLock(target, async txn => {
     await assert.rejects(deviceLease(d1, () => assert.fail('blocked device mutation')), /operation is still running/);
-    await assert.rejects(journal.withLock(target, () => assert.fail('blocked duplicate upgrade')), /正.*执行/);
+    await assert.rejects(journal.withLock(target, () => assert.fail('blocked duplicate upgrade')), { code: 'management_lock_busy' });
     await txn.assertHeld();
     await txn.write({ phase: 'uploading' });
     assert.deepEqual(await txn.read(), { phase: 'uploading' });
@@ -40,7 +40,7 @@ test('an expired lease cannot overwrite a newer fencer or erase its lock', async
     await createUpgradeJournal(d1).withLock(target, async current => {
       await current.write({ phase: 'deploying' });
       await assert.rejects(stale.assertHeld(), /失去锁/);
-      await assert.rejects(stale.write({ phase: 'confirmed' }), /失去锁/);
+      await assert.rejects(stale.write({ phase: 'confirmed' }), { code: 'management_journal_unconfirmed' });
       await current.assertHeld();
     });
   });

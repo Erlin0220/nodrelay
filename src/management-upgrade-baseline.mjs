@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { planUpgradeBaseline, validateUpgradeBaselineCandidate } from '../cloud/upgrade-baseline-plan.mjs';
 import { createCloudflareUpgradeAdapter } from '../cloud/upgrade-cloudflare.mjs';
+import { createUpgradeJournal } from '../cloud/upgrade-journal.mjs';
+import { createUpgradeD1Rest } from './upgrade-d1-rest.mjs';
 
 const migrations = [
   ['0004_enrollment_intents.sql', 'enrollment_intents', ['id', 'device_id', 'code_digest', 'code_ciphertext', 'snapshot',
@@ -60,23 +62,12 @@ export async function adoptManagementUpgradeBaseline({ api, expected, release, j
     throw new Error('上次上传结果未确认。请先核对 Cloudflare 版本，不会重复上传。');
   }
   const path = '/accounts/' + expected.accountId + '/d1/database/' + expected.databaseId + '/query';
-  const owner = randomUUID();
-  const leaseSeconds = 90;
-  const seconds = () => Math.floor(Date.now() / 1000);
-  const claim = await d1Query(api, path, `INSERT INTO fleet_leases (id, owner, expires_at) VALUES (1, ?, ?)
-    ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, expires_at = excluded.expires_at
-    WHERE fleet_leases.expires_at <= ? RETURNING owner`, [owner, seconds() + leaseSeconds, seconds()]);
-  if (!claim.some(result => result.results?.[0]?.owner === owner)) {
-    throw new Error('已有管理操作在执行。未切换 Worker，请稍后重新运行原命令。');
-  }
-  const fence = async latest => {
-    await assertFresh(latest);
-    const rows = await d1Query(api, path,
-      'UPDATE fleet_leases SET expires_at = ? WHERE id = 1 AND owner = ? AND expires_at > ? RETURNING owner',
-      [seconds() + leaseSeconds, owner, seconds()]);
-    if (!rows.some(result => result.results?.[0]?.owner === owner)) throw new Error('升级操作失去锁，未继续写入。');
-  };
-  try {
+  const lease = createUpgradeJournal(createUpgradeD1Rest(api, expected));
+  return lease.withLock(expected, async ({ assertHeld }) => {
+    const fence = async latest => {
+      await assertFresh(latest);
+      await assertHeld();
+    };
     const advance = async (next, fallback, latest) => {
       await fence(latest);
       await journal.write(next);
@@ -117,9 +108,7 @@ export async function adoptManagementUpgradeBaseline({ api, expected, release, j
     requireTraffic(await adapter.readDeployment(expected), staged.id, staged.id);
     await journal.write({ ...record, phase: 'confirmed', staged });
     return { versionId: staged.id, releaseVersion: record.version, recovered: false };
-  } finally {
-    await d1Query(api, path, 'DELETE FROM fleet_leases WHERE id = 1 AND owner = ?', [owner]).catch(() => {});
-  }
+  });
 }
 
 async function d1Query(api, endpoint, sql, params = []) {

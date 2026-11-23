@@ -12,6 +12,7 @@ import { hostedInstallers, installPath, operatingSystems } from '../cloud/device
 import { bootstrapInstaller } from '../cloud/install-command.mjs';
 import { managementBootstrapOAuthScopes, managementIdentityOAuthScopes, managementIdentityScope, managementOAuthScopes, usableStoredGrant } from '../cloud/oauth-grant.mjs';
 import { authorize, openBrowser } from './cloudflare-oauth.mjs';
+import { writeManagementFailure } from './management-diagnostics.mjs';
 import { archiveInterruptedManagementLock, ManagementLockError, takeManagementLock } from './management-lock.mjs';
 import { ensureManagementAccess } from './management-onboarding.mjs';
 import { portalAccessReady, validatePortalUrl } from './portal-readiness.mjs';
@@ -845,7 +846,14 @@ export async function deployManagement(ui, release, grant, zone, profileEmail, n
   }
 }
 
-async function main() {
+async function reportManagementFailure(error, context, show) {
+  // Logging is best-effort: preserve the original error if local storage is
+  // unavailable, rather than replacing it with a permissions or disk error.
+  const path = await writeManagementFailure(error, context).catch(() => undefined);
+  show(path ? `脱敏诊断日志：${path}` : '未能保存本地诊断日志。');
+}
+
+async function main(diagnostic) {
   const { positionals, values } = parseArgs({
     allowPositionals: true,
     options: {
@@ -853,6 +861,8 @@ async function main() {
       namespace: { type: 'string' }, portal: { type: 'string' },
     },
   });
+  diagnostic.mode = values.reconnect ? 'reconnect' : values.resume ? 'resume'
+    : values.check ? 'check' : values.plan ? 'plan' : 'install';
   if (positionals.length !== (values.check ? 4 : 2) ||
       [values.plan, values.check, values.reconnect, values.resume].filter(Boolean).length > 1 ||
       ((values.plan || values.check) && values.namespace !== undefined) || (values.portal !== undefined && !values.check)) {
@@ -863,9 +873,12 @@ async function main() {
     throw new Error('部署名称应为 3–16 个字符，以小写字母开头，只能包含小写字母、数字和连字符。');
   }
   const [manifest, publisherKey, origin, issuer] = positionals;
+  diagnostic.stage = 'release_verification';
   const release = await managementRelease(resolve(manifest), resolve(publisherKey));
+  diagnostic.version = release.webUpgrade?.version;
   const scopes = release.zeroTrustBootstrap ? managementBootstrapOAuthScopes : release.automaticAdministrator ? managementIdentityOAuthScopes : managementOAuthScopes;
   if (values.check) {
+    diagnostic.stage = 'readiness';
     const ready = await checkManagementReadiness(origin, issuer, release.releases, { portal: values.portal });
     console.log(`Nodrelay management console is ready at ${ready}`);
     return;
@@ -878,6 +891,7 @@ async function main() {
       oauthTokenProvisioning: false }, null, 2));
     return;
   }
+  diagnostic.stage = 'terminal';
   if (!process.stdin.isTTY || !process.stdout.isTTY || process.env.TERM === 'dumb') {
     throw new Error('请在 Mac 的交互式终端运行安装命令。');
   }
@@ -889,6 +903,7 @@ async function main() {
   ui.intro(values.reconnect ? '诺联 Nodrelay · 恢复管理台授权'
     : values.resume ? '诺联 Nodrelay · 继续管理台部署' : '诺联 Nodrelay · 管理台安装');
   try {
+    diagnostic.stage = 'authorization';
     ui.step(1, '授权 Cloudflare');
     ui.note([
       '读取账户与域名，配置 DNS、Worker、D1、Access、Tunnel 和 MCP Portal。',
@@ -902,10 +917,13 @@ async function main() {
       authorize({ clientId: release.clientId, redirectUri: release.redirectUri, scopes,
         startThroughLoopback: true, refreshable: true, timeoutMs: 600000, signal }));
     const api = cloudflareApi(grant.access);
+    diagnostic.stage = 'target_selection';
     ui.step(2, '选择账户与部署域名');
     const zone = await verifyManagementZone(api, await chooseManagementZone(api, ui));
+    diagnostic.stage = 'administrator';
     ui.step(3, recovery ? '使用原回执中的管理员' : '识别管理员');
     const ownerEmail = values.reconnect || !release.automaticAdministrator ? undefined : await getManagementOwnerEmail(api);
+    diagnostic.stage = 'deployment';
     ui.step(4, values.reconnect ? '确认并恢复授权' : values.resume ? '核对并继续部署' : '确认并部署');
     const result = await deployManagement(ui, release, grant, zone, ownerEmail, namespace, values);
     if (result.recoveryOnly) {
@@ -940,6 +958,7 @@ async function main() {
       return;
     }
     ui.success('Cloudflare 已接受部署');
+    diagnostic.stage = 'deployment_confirmation';
     await finishCloudDeployment(result, cloudflareApi(grant.access, { requestTimeoutMs: 5000 }), ui);
   } catch (error) {
     if (error instanceof InstallationCancelled) {
@@ -947,15 +966,18 @@ async function main() {
       process.exitCode = 1;
     } else {
       ui.error(error.name === 'SyntaxError' ? '诺联发行文件或 Cloudflare 响应格式无效。' : error.message);
+      await reportManagementFailure(error, diagnostic, ui.info);
       process.exitCode = 1;
     }
   }
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  try { await main(); }
+  const diagnostic = { stage: 'arguments' };
+  try { await main(diagnostic); }
   catch (error) {
     console.error(error.name === 'SyntaxError' ? 'Invalid Nodrelay release or Cloudflare response' : error.message);
+    if (!(error instanceof InstallationCancelled)) await reportManagementFailure(error, diagnostic, console.error);
     process.exitCode = 1;
   }
 }
