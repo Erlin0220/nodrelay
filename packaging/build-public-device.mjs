@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { openAsBlob, createReadStream } from 'node:fs';
-import { copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -62,6 +62,9 @@ try {
   if (v.trim() !== 'v' + nodeVersion) throw new Error('Vendor binary reports an unexpected Node.js version');
   await copyFile(join(license, 'personal-devspace.txt'), join(personal, 'LICENSE'));
   if (!macos) {
+    const platformModule = join(personal, 'personal', 'desktop', 'platform.mjs');
+    const source = await readFile(platformModule, 'utf8');
+    if (source.includes('\r\n')) await writeFile(platformModule, source.replaceAll('\r\n', '\n'));
     const patch = resolve('packaging', windows ? 'windows-personal-payload.patch' : 'linux-personal-payload.patch');
     const reverse = ['-c', 'core.autocrlf=false', 'apply', '--reverse', '--whitespace=error'];
     await run('git', [...reverse, '--check', patch], { cwd: legacy });
