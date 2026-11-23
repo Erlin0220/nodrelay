@@ -195,7 +195,10 @@ test('pre-cutover readback after lost upload acknowledges only old traffic and n
   assert.deepEqual(await confirmRecordedDeployment({ expected, operationId, api: f.api, journal: f.journal }),
     { status: 'baseline_active_upload_unconfirmed', version: release.version, operationId });
   assert.equal(f.state().phase, 'uploading');
-  assert.deepEqual(f.log.filter(([action]) => action === 'journal').map(([, phase]) => phase), ['uploading']);
+  // The second write keeps what is known about the failure; it never clears the record.
+  assert.deepEqual(f.log.filter(([action]) => action === 'journal').map(([, phase]) => phase), ['uploading', 'uploading']);
+  assert.deepEqual(f.state().uploadFailure, { kind: 'unknown' });
+  assert.equal(f.state().uploadStartedAt, now);
   assert.equal(f.log.filter(([action]) => action === 'upload').length, 1);
   assert.equal(f.log.filter(([action]) => action === 'deploy').length, 0);
 });
@@ -344,4 +347,70 @@ test('signed preview feed migration preserves legacy devices and reconciles a lo
   const foreign = fixture({ format2: true, feed: 'https://foreign.example.test/updates/' });
   await assert.rejects(foreign.run({ artifact: v2, enrollmentApproval }), { code: 'target_drift' });
   assert.equal(foreign.log.some(([name]) => name === 'upload' || name === 'deploy'), false);
+});
+
+test('an upload Cloudflare refused is settled at once and a new upgrade can start', async () => {
+  const { CloudflareError } = await import('../cloud/cloudflare.mjs');
+  const f = fixture();
+  const refused = { ...f.api, async uploadVersion() { throw new CloudflareError('POST', 400, [10021]); },
+    async taggedVersions() { return []; } };
+  await assert.rejects(f.run({ api: refused }), error => error.code === 'upload_unconfirmed' &&
+    /HTTP 400, codes 10021/.test(error.message) && error.failure.kind === 'refused');
+  assert.deepEqual(f.state().uploadFailure, { kind: 'refused', status: 400, codes: [10021] });
+  assert.deepEqual(await confirmRecordedDeployment({ expected, operationId, api: refused, journal: f.journal, now: () => now }),
+    { status: 'upload_abandoned', version: release.version, operationId });
+  assert.equal(f.state().phase, 'abandoned');
+  assert.deepEqual(await confirmRecordedDeployment({ expected, operationId, api: refused, journal: f.journal }),
+    { status: 'upload_abandoned', version: release.version, operationId }, 'checking again stays settled');
+  const next = '22222222-3333-4444-8555-666666666666';
+  assert.deepEqual(await f.run({ operationId: next }), { status: 'deployment_confirmed', version: '0.1.6', versionId: candidateVersion });
+  assert.equal(f.state().operationId, next);
+});
+
+test('a timed-out upload is settled only after the settle time and only while no tagged version exists', async () => {
+  const { CloudflareRequestTimeoutError } = await import('../cloud/cloudflare.mjs');
+  const { uploadSettleMs } = await import('../cloud/upgrade-operation.mjs');
+  const f = fixture();
+  let tagged = [];
+  const timedOut = { ...f.api, async uploadVersion() { throw new CloudflareRequestTimeoutError('POST', 30000); },
+    async taggedVersions(_target, tag) { assert.equal(tag, operationId); return tagged; } };
+  await assert.rejects(f.run({ api: timedOut }), /request timed out/);
+  const check = at => confirmRecordedDeployment({ expected, operationId, api: timedOut, journal: f.journal, now: () => at });
+  assert.deepEqual(await check(now + 60_000),
+    { status: 'baseline_active_upload_unconfirmed', version: release.version, operationId, retryAfter: now + uploadSettleMs });
+  assert.equal(f.state().phase, 'uploading');
+  tagged = [];
+  const foreign = { ...timedOut, readDeployment: async () => ({ deployments: [{ version_id: activeVersion, percentage: 100 }], latestVersion: foreignVersion }) };
+  assert.equal((await confirmRecordedDeployment({ expected, operationId, api: foreign, journal: f.journal, now: () => now + uploadSettleMs })).status,
+    'baseline_active_upload_unconfirmed', 'a newer unrelated upload is never treated as proof');
+  assert.equal(f.state().phase, 'uploading');
+  assert.equal((await check(now + uploadSettleMs)).status, 'upload_abandoned');
+  assert.equal(f.log.filter(([action]) => action === 'deploy').length, 0);
+});
+
+test('an upload that did land is recorded as the staged candidate, never as abandoned', async () => {
+  const f = fixture({ failUpload: true });
+  await assert.rejects(f.run(), { code: 'upload_unconfirmed' });
+  const api = { ...f.api, async taggedVersions() { return [candidateVersion]; } };
+  assert.deepEqual(await confirmRecordedDeployment({ expected, operationId, api, journal: f.journal, now: () => now + 3_600_000 }),
+    { status: 'baseline_active_candidate_staged', version: release.version, operationId });
+  assert.equal(f.state().phase, 'staged');
+  assert.equal(f.state().candidateVersion, candidateVersion);
+  assert.equal(f.state().candidateEtag, candidate.etag);
+  const twice = { ...f.api, async taggedVersions() { return [candidateVersion, foreignVersion]; } };
+  const g = fixture({ failUpload: true });
+  await assert.rejects(g.run(), { code: 'upload_unconfirmed' });
+  await assert.rejects(confirmRecordedDeployment({ expected, operationId, api: twice, journal: g.journal }), { code: 'candidate_unproven' });
+});
+
+test('a record from before upload timestamps starts its settle wait at the first check', async () => {
+  const { uploadSettleMs } = await import('../cloud/upgrade-operation.mjs');
+  const legacy = { operationId, baseVersion: activeVersion, releaseVersion: release.version, releaseSha256: release.workerSha256, phase: 'uploading' };
+  const f = fixture({ initialJournal: legacy });
+  const api = { ...f.api, async taggedVersions() { return []; } };
+  const check = at => confirmRecordedDeployment({ expected, operationId, api, journal: f.journal, now: () => at });
+  assert.equal((await check(now)).retryAfter, now + uploadSettleMs);
+  assert.equal(f.state().uploadCheckedAt, now);
+  assert.equal((await check(now + uploadSettleMs - 1)).status, 'baseline_active_upload_unconfirmed');
+  assert.equal((await check(now + uploadSettleMs)).status, 'upload_abandoned');
 });

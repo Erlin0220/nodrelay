@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { DatabaseSync } from 'node:sqlite';
 import test from 'node:test';
+import { CloudflareError } from '../cloud/cloudflare.mjs';
 import { createUpgradeAdmin } from '../cloud/upgrade-admin.mjs';
 import { createCloudflareUpgradeAdapter } from '../cloud/upgrade-cloudflare.mjs';
 import { createUpgradeD1Rest } from '../src/upgrade-d1-rest.mjs';
@@ -46,7 +47,7 @@ const version = id => ({ id, resources: {
   { name:'PROVISIONER_OAUTH',type:'durable_object_namespace',class_name:'OAuthProvisioner',namespace_id:'c'.repeat(32) },
   { name:'TICKET_KEY',type:'secret_text' },{ name:'FLEET_OAUTH_KEY',type:'secret_text' }],
 } });
-async function fixture(t, { corruptFeed = false, lostDeploy = false, delayDeploy = false, lostUpload = false, posted = false, wrongD1 = false } = {}) {
+async function fixture(t, { corruptFeed = false, lostDeploy = false, delayDeploy = false, lostUpload = false, posted = false, wrongD1 = false, refuseUpload = false } = {}) {
   const db = new DatabaseSync(':memory:');t.after(()=>db.close());
   for (const file of ['0002_devices.sql','0005_upgrade_journal.sql']) db.exec(await readFile(new URL('../cloud/'+file,import.meta.url),'utf8'));
   db.prepare("INSERT INTO fleet_devices (id, platform, status, unique_name, updated_at) VALUES (?, ?, ?, ?, ?)").run(
@@ -71,6 +72,7 @@ async function fixture(t, { corruptFeed = false, lostDeploy = false, delayDeploy
       return [{success:true,results}];
     }
     if(path===script+'/versions?bindings_inherit=strict'){
+      if(refuseUpload){refuseUpload=false;throw new CloudflareError('POST',400,[10021]);}
       uploads++;latest=active===old?next:after;
       const metadata=JSON.parse(await body.get('metadata').text());
       assert.deepEqual(metadata.bindings.find(x=>x.name==='TICKETS'),{name:'TICKETS',type:'inherit'});
@@ -194,4 +196,13 @@ test('old traffic after an ambiguous cutover is reported without replay, and lat
   assert.equal(f.snapshot().uploads, submitted.uploads);
   assert.equal(f.snapshot().deploys, submitted.deploys);
   assert.equal(f.snapshot().feedReads, submitted.feedReads);
+});
+
+test('after Cloudflare refused an upload, rerunning the same command closes that record and upgrades once', async t => {
+  const f=await fixture(t,{refuseUpload:true});
+  await assert.rejects(f.run(),error=>error.code==='upload_unconfirmed'&&/HTTP 400, codes 10021/.test(error.message));
+  assert.equal(f.snapshot().uploads,0);assert.equal(f.snapshot().deploys,0);assert.equal(f.snapshot().active,old);
+  assert.deepEqual(await f.run(),{confirmedVersion:update});
+  assert.equal(f.snapshot().uploads,1);assert.equal(f.snapshot().deploys,1);assert.equal(f.snapshot().active,next);
+  assert.equal((await f.web().status()).phase,'confirmed');
 });

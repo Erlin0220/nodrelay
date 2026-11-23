@@ -142,3 +142,19 @@ test('rejects capability expansion and unverified mutation acknowledgments with 
   await assert.rejects(adapter.deployVersion(target, { strategy: 'percentage', versions: weights(next) }), /requested full rollout/);
   assert.equal(calls, 2);
 });
+
+test('an upload rejected before sending is marked unsent, and tagged versions are found by operation', async () => {
+  const target = { accountId: 'a'.repeat(32), worker: 'fleet-demo-111111111111' };
+  const tag = '11111111-2222-4333-8444-555555555555';
+  const seen = [];
+  const api = { async get(path, query) { seen.push([path, query]); return { items: [
+    { id: '11111111-2222-3333-4444-555555555555', annotations: { 'workers/tag': tag } },
+    { id: '22222222-3333-4444-5555-666666666666', annotations: { 'workers/triggered_by': 'upload' } },
+  ] }; }, async post() { throw new Error('must not be sent'); } };
+  const adapter = createCloudflareUpgradeAdapter(api, target);
+  await assert.rejects(adapter.uploadVersion(target, { bundle: new Uint8Array(), module: 'worker.js' }),
+    error => error.notSent === true && /Invalid staged Cloudflare Worker upload input/.test(error.message));
+  assert.deepEqual(await adapter.taggedVersions(target, tag), ['11111111-2222-3333-4444-555555555555']);
+  assert.deepEqual(seen[0], ['/accounts/' + target.accountId + '/workers/scripts/' + target.worker + '/versions', { page: 1, per_page: 20 }]);
+  await assert.rejects(adapter.taggedVersions(target, 'not-a-uuid'), /Invalid Cloudflare upgrade operation tag/);
+});

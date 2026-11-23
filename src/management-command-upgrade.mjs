@@ -67,14 +67,21 @@ export async function upgradeManagementFromCommand({
     accessAudience, activeVersion: live.version_id, currentVersion };
   const journal = createUpgradeJournal(db);
   const previous = await readUpgradeJournal(db, target);
-  if (previous && previous.phase !== 'confirmed') {
+  if (previous && !['confirmed', 'abandoned'].includes(previous.phase)) {
     const result = await confirmRecordedDeployment({ expected: { ...expected, activeVersion: previous.baseVersion },
       operationId: previous.operationId, api: probe, journal });
     if (result.status === 'deployment_confirmed') return { confirmedVersion: result.version };
     if (result.status === 'baseline_active_rollout_unconfirmed') {
       throw new Error('核对时 Cloudflare 流量仍全部指向旧版，候选版本已上传，但上次切换的结果仍未确认。未重新提交，请稍后查看管理台升级状态。');
     }
-    throw new Error('上次上传或切换尚未确认，本次仅核对状态，未重复提交。请在管理台查看升级状态。');
+    if (result.status === 'baseline_active_upload_unconfirmed' && Number.isSafeInteger(result.retryAfter)) {
+      const at = new Date(result.retryAfter).toLocaleTimeString('zh-CN', { hour12: false });
+      throw new Error(`上次上传的结果还不能确认：Cloudflare 上没有这次上传的版本，旧版仍在服务。为防止重复上传，请在 ${at} 之后重新运行同一条命令；届时仍没有出现这个版本，就会关闭记录并重新升级。未改动管理台。`);
+    }
+    if (result.status !== 'upload_abandoned') {
+      throw new Error('上次上传或切换尚未确认，本次仅核对状态，未重复提交。请在管理台查看升级状态。');
+    }
+    ui?.note?.('已确认上次上传没有到达 Cloudflare，旧记录已关闭，继续本次升级。', '管理台升级');
   }
   if (deployment.latestVersion !== live.version_id) {
     throw new Error('Cloudflare 正在运行的版本与最近上传的版本不同。为避免继承错误配置，本次未上传或切换。');
