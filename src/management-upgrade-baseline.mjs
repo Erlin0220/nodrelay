@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { planUpgradeBaseline, validateUpgradeBaselineCandidate } from '../cloud/upgrade-baseline-plan.mjs';
 import { createCloudflareUpgradeAdapter } from '../cloud/upgrade-cloudflare.mjs';
-import { createUpgradeJournal } from '../cloud/upgrade-journal.mjs';
+import { commandLeaseWaitMs, createUpgradeJournal } from '../cloud/upgrade-journal.mjs';
 import { createUpgradeD1Rest } from './upgrade-d1-rest.mjs';
 
 const migrations = [
@@ -28,7 +28,7 @@ function sameRecord(record, release, expected, sha256) {
 // of the exact existing managed deployment. Caller holds its install receipt lock.
 // A pending write is never blindly retried. No access, domains, OAuth grants,
 // secrets or catalog entries are written by this operation.
-export async function adoptManagementUpgradeBaseline({ api, expected, release, journal, readMigration }) {
+export async function adoptManagementUpgradeBaseline({ api, expected, release, journal, readMigration, onLeaseWait, onLeaseAcquired, signal }) {
   if (!(release?.bundle instanceof Uint8Array) || !release.bundle.length || !release.webUpgrade ||
       typeof journal?.read !== 'function' || typeof journal?.write !== 'function' || typeof readMigration !== 'function') {
     throw new Error('诺联升级基线缺少签名安装包或安装回执。');
@@ -62,7 +62,8 @@ export async function adoptManagementUpgradeBaseline({ api, expected, release, j
     throw new Error('上次上传结果未确认。请先核对 Cloudflare 版本，不会重复上传。');
   }
   const path = '/accounts/' + expected.accountId + '/d1/database/' + expected.databaseId + '/query';
-  const lease = createUpgradeJournal(createUpgradeD1Rest(api, expected));
+  const lease = createUpgradeJournal(createUpgradeD1Rest(api, expected), onLeaseWait ?
+    { waitMs: commandLeaseWaitMs, onWait: onLeaseWait, onAcquiredAfterWait: onLeaseAcquired, signal: () => signal } : {});
   return lease.withLock(expected, async ({ assertHeld }) => {
     const fence = async latest => {
       await assertFresh(latest);

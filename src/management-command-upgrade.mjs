@@ -3,7 +3,7 @@ import { matchesInstallerFeed } from '../cloud/upgrade-feed-migration.mjs';
 import { confirmPreviewMigrationMirror, loadVerifiedUpgradeArtifacts } from '../cloud/upgrade-artifacts.mjs';
 import { createCloudflareUpgradeAdapter } from '../cloud/upgrade-cloudflare.mjs';
 import { ensureEnrollmentAccessRoutes, inspectEnrollmentUpgradeReadiness } from '../cloud/upgrade-enrollment-readiness.mjs';
-import { createUpgradeJournal, readUpgradeJournal } from '../cloud/upgrade-journal.mjs';
+import { commandLeaseWaitMs, createUpgradeJournal, readUpgradeJournal } from '../cloud/upgrade-journal.mjs';
 import { confirmRecordedDeployment, runUpgradeOperation } from '../cloud/upgrade-operation.mjs';
 import { createUpgradeD1Rest } from './upgrade-d1-rest.mjs';
 
@@ -65,7 +65,14 @@ export async function upgradeManagementFromCommand({
 
   const expected = { ...target, zoneId: spec.zoneId, origin: spec.origin, ownerEmail: spec.ownerEmail,
     accessAudience, activeVersion: live.version_id, currentVersion };
-  const journal = createUpgradeJournal(db);
+  const preparing = '正在验签、上传并切换管理台版本';
+  const waiting = '云端锁被占用，正在自动等待（约 95 秒内，无需重跑）';
+  let progress;
+  let operationSignal;
+  const journal = createUpgradeJournal(db, ui ? { waitMs: commandLeaseWaitMs,
+    signal: () => operationSignal,
+    onWait: () => progress ? progress(waiting) : ui.info?.(waiting),
+    onAcquiredAfterWait: () => progress?.(preparing) } : {});
   const previous = await readUpgradeJournal(db, target);
   if (previous && !['confirmed', 'abandoned'].includes(previous.phase)) {
     const result = await confirmRecordedDeployment({ expected: { ...expected, activeVersion: previous.baseVersion },
@@ -104,13 +111,17 @@ export async function upgradeManagementFromCommand({
     const added = await ensureEnrollmentAccessRoutes({ api, spec: deployed });
     if (added.length) ui?.note?.(`已为设备安装补齐公开入口：${added.join('、')}。其他登录配置未改动。`, 'Access');
   }
-  const execute = () => runUpgradeOperation({
-    expected, artifact, operationId: randomUUID(),
-    api: createCloudflareUpgradeAdapter(api, target, { enrollment: release.schema === 2 }),
-    journal,
-    enrollmentApproval: release.schema === 2 ? { manifestSha256,
-      inspect: () => inspectEnrollmentUpgradeReadiness({ api, db, spec: deployed }) } : undefined,
-  });
-  const result = ui?.wait ? await ui.wait('正在验签、上传并切换管理台版本', 'Cloudflare 已确认版本切换', execute) : await execute();
+  const execute = (signal, update) => {
+    operationSignal = signal;
+    progress = update;
+    return runUpgradeOperation({
+      expected, artifact, operationId: randomUUID(),
+      api: createCloudflareUpgradeAdapter(api, target, { enrollment: release.schema === 2 }),
+      journal,
+      enrollmentApproval: release.schema === 2 ? { manifestSha256,
+        inspect: () => inspectEnrollmentUpgradeReadiness({ api, db, spec: deployed }) } : undefined,
+    });
+  };
+  const result = ui?.wait ? await ui.wait(preparing, 'Cloudflare 已确认版本切换', execute) : await execute();
   return { confirmedVersion: result.version };
 }

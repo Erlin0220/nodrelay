@@ -1,6 +1,9 @@
 import { base64url } from 'jose';
 
 const duration = 90; // Same lock and duration as existing managed device mutations.
+export const commandLeaseWaitMs = 95_000;
+const pollMs = 3_000;
+const normalLeaseLimit = duration + 5;
 
 function key(target) {
   if (!/^[a-f0-9]{32}$/.test(target?.accountId ?? '') ||
@@ -27,6 +30,7 @@ function diagnostic(error, stage, state, mutation) {
     stage, ownership: ownership(state),
     ...(Number.isSafeInteger(mutation?.meta?.changes) && { changes: mutation.meta.changes }),
     ...(Array.isArray(mutation?.results) && { rows: mutation.results.length }),
+    ...(Number.isSafeInteger(state?.seconds_left) && { secondsLeft: state.seconds_left }),
   };
   return error;
 }
@@ -37,37 +41,70 @@ export async function readUpgradeJournal(db, target) {
   return row ? JSON.parse(row.record) : undefined;
 }
 
-export function createUpgradeJournal(db) {
+export function createUpgradeJournal(db, {
+  waitMs = 0, onWait, onAcquiredAfterWait, signal = () => undefined, now = () => performance.now(),
+  sleep = ms => new Promise(resolve => setTimeout(resolve, ms)),
+} = {}) {
   return {
     async withLock(target, run) {
       const id = key(target);
       const owner = base64url.encode(crypto.getRandomValues(new Uint8Array(32)));
-      const readLease = () => db.prepare(`SELECT (owner = ?) AS own, (expires_at > unixepoch()) AS active
-        FROM fleet_leases WHERE id = 1`).bind(owner).first();
+      const readLease = () => db.prepare(`SELECT (owner = ?) AS own, (expires_at > unixepoch()) AS active,
+          (expires_at - unixepoch()) AS seconds_left FROM fleet_leases WHERE id = 1`).bind(owner).first();
       const release = () => db.prepare('DELETE FROM fleet_leases WHERE id = 1 AND owner = ?').bind(owner).run();
       let cleanup = true;
       try {
-        let claim;
-        let lease;
-        try {
-          // Keep the claim atomic. REST write responses can omit rows;
-          // a separate read is the authority on ownership, not RETURNING.
-          claim = await db.prepare(`INSERT INTO fleet_leases (id, owner, expires_at) VALUES (1, ?, unixepoch() + ?)
-            ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, expires_at = excluded.expires_at
-            WHERE fleet_leases.expires_at <= unixepoch()`).bind(owner, duration).run();
-          lease = await readLease();
-        } catch (error) {
-          throw diagnostic(upgradeStateError('management_lock_unconfirmed', '未能核实云端管理锁。未继续升级。', error),
+        const deadline = now() + Math.min(waitMs, commandLeaseWaitMs);
+        let announced = false;
+        let raced = 0;
+        cleanup = false;
+        for (;;) {
+          signal()?.throwIfAborted();
+          let claim;
+          let lease;
+          const unconfirmed = error => diagnostic(upgradeStateError('management_lock_unconfirmed',
+            '未能核实云端管理锁。未继续升级。', error), 'acquire', lease, claim);
+          const busy = message => diagnostic(upgradeStateError('management_lock_busy', message),
             'acquire', lease, claim);
-        }
-        if (ownership(lease) !== 'current') {
-          if (ownership(lease) === 'other') {
-            cleanup = false;
-            throw diagnostic(upgradeStateError('management_lock_busy', '另一个管理操作持有云端锁。请等它结束，再重试。'),
-              'acquire', lease, claim);
+          try {
+            cleanup = true;
+            // Claim atomically; REST writes need not return their changed row.
+            claim = await db.prepare(`INSERT INTO fleet_leases (id, owner, expires_at) VALUES (1, ?, unixepoch() + ?)
+              ON CONFLICT(id) DO UPDATE SET owner = excluded.owner, expires_at = excluded.expires_at
+              WHERE fleet_leases.expires_at <= unixepoch()`).bind(owner, duration).run();
+            lease = await readLease();
+          } catch (error) {
+            throw unconfirmed(error);
           }
-          throw diagnostic(upgradeStateError('management_lock_unconfirmed', '未能核实云端管理锁。未继续升级。'),
-            'acquire', lease, claim);
+          const state = ownership(lease);
+          if (state === 'current') {
+            signal()?.throwIfAborted();
+            if (announced) onAcquiredAfterWait?.();
+            break;
+          }
+          // A contender can release between a definite no-op and our SELECT.
+          if (waitMs > 0 && claim?.meta?.changes === 0 && (state === 'missing' || state === 'expired') &&
+              raced++ < 2 && now() < deadline) continue;
+          if (state !== 'other') throw unconfirmed();
+
+          cleanup = false; // Never release somebody else's claim.
+          if (!waitMs) throw busy('另一个管理操作持有云端锁。请等它结束，再重试。');
+          while (ownership(lease) === 'other') {
+            const remaining = deadline - now();
+            const seconds = lease.seconds_left;
+            if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > normalLeaseLimit) {
+              throw busy('云端锁的到期时间异常，未继续升级。请核对日志，不要手动清锁。');
+            }
+            if (remaining <= 0) throw busy(`云端锁仍被占用，已停止自动等待。当前预计还剩 ${seconds} 秒，未重复提交升级。`);
+            if (!announced) { onWait?.(); announced = true; }
+            await sleep(Math.min(remaining, pollMs));
+            signal()?.throwIfAborted();
+            try { lease = await readLease(); } catch (error) { throw unconfirmed(error); }
+          }
+          if (!['missing', 'expired'].includes(ownership(lease))) throw unconfirmed();
+          if (now() >= deadline) {
+            throw unconfirmed();
+          }
         }
         const assertHeld = async () => {
           let state;

@@ -150,3 +150,73 @@ test('a REST success without a persisted journal write cannot authorize an exter
   }), { code: 'management_journal_unconfirmed' });
   assert.equal(sqlite.prepare('SELECT count(*) AS n FROM fleet_leases').get().n, 0);
 });
+
+test('CLI waits for a short-lived competing lock using only reads, then claims and runs once', async t => {
+  const sqlite = new DatabaseSync(':memory:');
+  t.after(() => sqlite.close());
+  sqlite.exec("CREATE TABLE fleet_leases (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, expires_at INTEGER NOT NULL); INSERT INTO fleet_leases VALUES(1,'other',unixepoch()+90)");
+  let writes = 0, sleeps = 0, announced = 0, elapsed = 0, ran = 0;
+  const db = createUpgradeD1Rest({ async post(_path, { sql, params }) {
+    if (sql.startsWith('SELECT')) return [{ success: true, results: sqlite.prepare(sql).all(...params) }];
+    writes++;
+    const { changes } = sqlite.prepare(sql).run(...params);
+    return [{ success: true, results: [], meta: { changes } }];
+  } }, target);
+  const journal = createUpgradeJournal(db, {
+    waitMs: 95_000, now: () => elapsed, onWait: () => announced++,
+    sleep: async interval => {
+      assert.equal(writes, 1, 'only the first rejected atomic claim; wait must be read-only');
+      assert.equal(sqlite.prepare('SELECT owner FROM fleet_leases').get().owner, 'other');
+      if (++sleeps === 2) sqlite.exec('DELETE FROM fleet_leases');
+      elapsed += interval;
+    },
+  });
+  await journal.withLock(target, async () => { ran++; assert.equal(writes, 2); });
+  assert.equal(announced, 1);
+  assert.equal(ran, 1);
+  assert.equal(writes, 3, 'initial rejected claim, own claim, own release');
+});
+
+test('CLI stops at its wait budget or an abnormal expiry without touching the competing lock', async t => {
+  const sqlite = new DatabaseSync(':memory:');
+  t.after(() => sqlite.close());
+  sqlite.exec("CREATE TABLE fleet_leases (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, expires_at INTEGER NOT NULL); INSERT INTO fleet_leases VALUES(1,'other',unixepoch()+90)");
+  let writes = 0, elapsed = 0;
+  const db = createUpgradeD1Rest({ async post(_path, { sql, params }) {
+    if (sql.startsWith('SELECT')) return [{ success: true, results: sqlite.prepare(sql).all(...params) }];
+    writes++;
+    const { changes } = sqlite.prepare(sql).run(...params);
+    return [{ success: true, meta: { changes } }];
+  } }, target);
+  const journal = createUpgradeJournal(db, { waitMs: 95_000, now: () => elapsed, sleep: async ms => { elapsed += ms; } });
+  await assert.rejects(journal.withLock(target, () => assert.fail('must not enter while busy')), error => {
+    assert.equal(error.code, 'management_lock_busy');
+    assert.match(error.message, /已停止自动等待/);
+    assert.equal(error.diagnostic.ownership, 'other');
+    assert.ok(error.diagnostic.secondsLeft >= 89 && error.diagnostic.secondsLeft <= 90);
+    return true;
+  });
+  assert.equal(elapsed, 95_000);
+  assert.equal(writes, 1);
+  sqlite.exec("UPDATE fleet_leases SET expires_at = unixepoch()+3600");
+  const before = elapsed;
+  await assert.rejects(journal.withLock(target, () => assert.fail('must not enter on invalid TTL')), /到期时间异常/);
+  assert.equal(elapsed, before);
+  assert.equal(writes, 2);
+  assert.equal(sqlite.prepare('SELECT owner FROM fleet_leases').get().owner, 'other');
+});
+
+test('aborting a busy CLI wait cannot reclaim or release the other operation’s lock', async () => {
+  const controller = new AbortController();
+  const writes = [];
+  const db = createUpgradeD1Rest({ async post(_path, { sql }) {
+    if (sql.startsWith('SELECT')) return [{ success: true, results: [{ own: 0, active: 1, seconds_left: 60 }] }];
+    writes.push(sql);
+    return [{ success: true, meta: { changes: 0 } }];
+  } }, target);
+  const journal = createUpgradeJournal(db, { waitMs: 95_000, signal: () => controller.signal,
+    sleep: async () => controller.abort(new Error('fixture cancelled')) });
+  await assert.rejects(journal.withLock(target, () => assert.fail('no cancelled upgrade')), /fixture cancelled/);
+  assert.equal(writes.length, 1);
+  assert.match(writes[0], /^INSERT INTO fleet_leases/);
+});

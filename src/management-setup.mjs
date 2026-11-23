@@ -668,13 +668,16 @@ export async function deployManagement(ui, release, grant, zone, profileEmail, n
           const namespaceId = current.bindings.find(binding => binding.name === 'PROVISIONER_OAUTH')?.namespace_id;
           const expected = { ...target, activeVersion: id, zoneId: spec.zoneId, origin: spec.origin, ownerEmail: spec.ownerEmail,
             accessAudience: app.aud, databaseId: state.databaseId, namespaceId };
-          const upgraded = await ui.wait('正在为现有管理台启用网页升级', 'Cloudflare 已确认新版本', () =>
+          const upgraded = await ui.wait('正在为现有管理台启用网页升级', 'Cloudflare 已确认新版本', (signal, update) =>
             adoptManagementUpgradeBaseline({ api: scoped, expected, release,
               journal: { read: async () => state.upgradeBaseline, write: async record => {
                 state.upgradeBaseline = record;
                 await save(state);
               } },
               readMigration: file => readFile(new URL('../cloud/' + file, import.meta.url), 'utf8'),
+              signal,
+              onLeaseWait: () => update?.('云端锁被占用，正在自动等待（约 95 秒内，无需重跑）'),
+              onLeaseAcquired: () => update?.('正在为现有管理台启用网页升级'),
             }));
           try {
             const result = await upgradeManagementFromCommand({

@@ -60,6 +60,7 @@ export function managementFailureRecord(error, context = {}) {
     if (ownership.has(value?.ownership)) lock.ownership = value.ownership;
     if (count(value?.changes)) lock.changes = value.changes;
     if (count(value?.rows)) lock.rows = value.rows;
+    if (Number.isSafeInteger(value?.secondsLeft)) lock.secondsLeft = value.secondsLeft;
     if (Object.keys(lock).length) result.lock = lock;
   }
   return result;
