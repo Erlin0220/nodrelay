@@ -87,7 +87,7 @@ async function verificationKey(value) {
   const b64 = value.replaceAll('-', '+').replaceAll('_', '/') + '=';
   const decoded = atob(b64);
   if (btoa(decoded) !== b64) throw new Error('Invalid SPKI encoding');
-  return crypto.subtle.importKey('spki', Uint8Array.from(decoded, c => c.charCodeAt(0)), 'Ed25519', false, ['verify']);
+  return crypto.subtle.importKey('spki', Uint8Array.from(decoded, c => c.charCodeAt(0)), 'Ed25519', true, ['verify']);
 }
 
 // Internal owner-only adapter. Route caller must have verified the Access JWT

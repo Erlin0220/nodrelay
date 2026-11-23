@@ -1,4 +1,5 @@
 import { validateUpgradeBindings, validateUpgradePreconditions, verifyUpgradeRelease } from './upgrade-plan.mjs';
+import { legacyPreviewFeed, publicPreviewFeed } from './upgrade-feed-migration.mjs';
 import { planEnrollmentUpgrade } from './upgrade-enrollment-release.mjs';
 
 const uuid = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
@@ -80,8 +81,9 @@ const validEtag = value => typeof value === 'string' && /^[a-zA-Z0-9_-]{16,128}$
 // concurrent writers outside this lock are not authorized by this flow.
 const enrollmentBindings = ['FLEET_ENROLLMENT_PROTOCOL', 'FLEET_ENROLLMENT_HISTORY', 'FLEET_ENROLLMENT_CATALOG'];
 const validHash = x => typeof x === 'string' && /^[a-f0-9]{64}$/.test(x);
-async function enrollmentPlanDigest(changes) {
-  const value = JSON.stringify(enrollmentBindings.map(name => [name, changes[name]]));
+async function enrollmentPlanDigest(changes, migratesFeed = false) {
+  const fields = migratesFeed ? [...enrollmentBindings, 'NODRELAY_UPGRADE_FEED'] : enrollmentBindings;
+  const value = JSON.stringify(fields.map(name => [name, changes[name]]));
   return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))), b =>
     b.toString(16).padStart(2, '0')).join('');
 }
@@ -136,13 +138,28 @@ export async function runUpgradeOperation({ expected, artifact, operationId, api
         throw new UpgradeOperationError('enrollment_not_ready', 'Existing D1, Access or enrollment settings do not support this signed release.');
       }
     }
-    const changes = { NODRELAY_RELEASE_VERSION: release.version, ...enrollmentChanges };
+    const currentFeed = activeBindings.find(binding => binding.name === 'NODRELAY_UPGRADE_FEED');
+    const currentChannel = activeBindings.find(binding => binding.name === 'NODRELAY_UPGRADE_CHANNEL');
+    const migratesFeed = Boolean(release.feedMigration && currentFeed?.text === legacyPreviewFeed);
+    if (release.feedMigration) {
+      const currentKey = activeBindings.find(binding => binding.name === 'NODRELAY_UPGRADE_PUBLIC_KEY');
+      const pinnedKey = new Uint8Array(await crypto.subtle.exportKey('spki', artifact.publicKey));
+      const keyText = btoa(String.fromCharCode(...pinnedKey)).replaceAll('+', '-').replaceAll('/', '_').replace(/=+$/, '');
+      if (currentFeed?.type !== 'plain_text' || ![legacyPreviewFeed, publicPreviewFeed].includes(currentFeed.text) ||
+          currentChannel?.type !== 'plain_text' || currentChannel.text !== release.channel ||
+          currentKey?.type !== 'plain_text' || currentKey.text !== keyText) {
+        throw new UpgradeOperationError('target_drift', 'The active preview feed or signing key does not match the signed migration');
+      }
+    }
+    const changes = { NODRELAY_RELEASE_VERSION: release.version, ...enrollmentChanges,
+      ...(migratesFeed && { NODRELAY_UPGRADE_FEED: release.feedMigration.to }) };
     const names = new Set(activeBindings.map(({ name }) => name));
     const bindings = activeBindings.map(({ name }) => Object.hasOwn(changes, name)
       ? { name, type: 'plain_text', text: changes[name] } : { name, type: 'inherit' });
     for (const [name, text] of Object.entries(changes)) if (!names.has(name)) bindings.push({ name, type: 'plain_text', text });
     const record = { operationId, baseVersion: target.activeVersion, releaseVersion: release.version, releaseSha256: release.workerSha256,
-      ...(enrollmentChanges && { manifestSha256, enrollmentChangesSha256: await enrollmentPlanDigest(enrollmentChanges) }) };
+      ...(enrollmentChanges && { manifestSha256, enrollmentChangesSha256: await enrollmentPlanDigest(changes, migratesFeed) }),
+      ...(migratesFeed && { migratesFeed: true }) };
     const assertStable = async latest => {
       requireDeployment(await api.readDeployment(target), target.activeVersion, latest);
       await txn.assertHeld();
@@ -249,14 +266,18 @@ export async function confirmRecordedDeployment({ expected, operationId, api, jo
     }
     checkTarget(original.bindings, { ...target, currentVersion });
     const changes = { NODRELAY_RELEASE_VERSION: record.releaseVersion };
-    if (record.manifestSha256 !== undefined || record.enrollmentChangesSha256 !== undefined) {
+    if (record.manifestSha256 !== undefined || record.enrollmentChangesSha256 !== undefined || record.migratesFeed !== undefined) {
       if (!validHash(record.manifestSha256) || !validHash(record.enrollmentChangesSha256)) {
         throw new UpgradeOperationError('candidate_unproven', 'The enrollment release record is incomplete');
       }
       for (const name of enrollmentBindings) {
         changes[name] = candidate.bindings.find(binding => binding.name === name && binding.type === 'plain_text')?.text;
       }
-      if (await enrollmentPlanDigest(changes) !== record.enrollmentChangesSha256) {
+      if (record.migratesFeed === true) changes.NODRELAY_UPGRADE_FEED = publicPreviewFeed;
+      else if (record.migratesFeed !== undefined) {
+        throw new UpgradeOperationError('candidate_unproven', 'The feed migration record is invalid');
+      }
+      if (await enrollmentPlanDigest(changes, record.migratesFeed === true) !== record.enrollmentChangesSha256) {
         throw new UpgradeOperationError('candidate_unproven', 'The enrollment settings do not match the original verified plan');
       }
     }

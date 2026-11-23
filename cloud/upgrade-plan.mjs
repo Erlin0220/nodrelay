@@ -1,3 +1,4 @@
+import { legacyPreviewFeed, normalizeFeedMigration, publicPreviewFeed } from './upgrade-feed-migration.mjs';
 import { validateSignedEnrollmentRelease } from './upgrade-enrollment-release.mjs';
 
 const MAX_MANIFEST = 64 * 1024;
@@ -9,7 +10,7 @@ const requiredPlain = ['APP_ORIGIN', 'ACCESS_ISSUER', 'ACCESS_AUD', 'OWNER_EMAIL
   'FLEET_OAUTH_CLIENT_ID', 'FLEET_OAUTH_MODE', 'FLEET_OAUTH_RECOVERY'];
 const requiredSecrets = ['TICKET_KEY', 'FLEET_OAUTH_KEY'];
 const blockedBindings = ['PROVISIONER_TOKEN', 'FLEET_OAUTH_SEED', 'FLEET_OAUTH_RECONNECT'];
-const permittedChanges = new Set(['NODRELAY_RELEASE_VERSION',
+const permittedChanges = new Set(['NODRELAY_RELEASE_VERSION', 'NODRELAY_UPGRADE_FEED',
   'FLEET_ENROLLMENT_PROTOCOL', 'FLEET_ENROLLMENT_HISTORY', 'FLEET_ENROLLMENT_CATALOG']);
 
 function version(value) {
@@ -55,7 +56,10 @@ export async function verifyUpgradeRelease({ manifest, signature, bundle, public
   try { release = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(verifiedManifest)); }
   catch { throw new Error('Invalid Nodrelay upgrade metadata'); }
   const fields = ['schema', 'product', 'channel', 'version', 'minimumVersion', 'issuedAt', 'expiresAt', 'workerBundle', 'workerSha256'];
-  if (format === 2) fields.push('enrollment');
+  if (format === 2) {
+    fields.push('enrollment');
+    if (Object.hasOwn(release ?? {}, 'feedMigration')) fields.push('feedMigration');
+  }
   if (!release || !fields.every(name => Object.hasOwn(release, name)) || Object.keys(release).length !== fields.length ||
       release.schema !== format || release.product !== 'nodrelay-management' || release.workerBundle !== 'worker.js' ||
       typeof release.workerSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(release.workerSha256)) {
@@ -73,6 +77,7 @@ export async function verifyUpgradeRelease({ manifest, signature, bundle, public
   if (actual !== release.workerSha256) throw new Error('Nodrelay upgrade Worker SHA-256 mismatch');
   if (format === 2) {
     const manifestSha256 = await sha256(verifiedManifest);
+    if (Object.hasOwn(release, 'feedMigration')) release.feedMigration = normalizeFeedMigration(release.feedMigration, channel);
     const enrollment = validateSignedEnrollmentRelease({ release, manifestSha256 });
     release.enrollment = Object.freeze({ protocol: enrollment.protocol, releases: enrollment.releases });
     return { release: Object.freeze(release), bundle: verifiedBundle, manifestSha256 };
@@ -135,6 +140,10 @@ export function validateUpgradeBindings(activeBindings, candidateBindings, plann
   for (const [name, text] of Object.entries(plannedChanges)) {
     if (!permittedChanges.has(name) || typeof text !== 'string' || !text ||
         (active.has(name) && active.get(name).type !== 'plain_text')) throw new Error('Unapproved Nodrelay binding change');
+    if (name === 'NODRELAY_UPGRADE_FEED' && (active.get(name)?.text !== legacyPreviewFeed ||
+        active.get('NODRELAY_UPGRADE_CHANNEL')?.text !== 'preview' || text !== publicPreviewFeed)) {
+      throw new Error('Unapproved Nodrelay feed migration');
+    }
     expected.set(name, { ...active.get(name), name, type: 'plain_text', text });
   }
   if (candidate.size !== expected.size || [...expected].some(([name, binding]) =>

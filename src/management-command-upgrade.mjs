@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { loadVerifiedUpgradeArtifacts } from '../cloud/upgrade-artifacts.mjs';
+import { matchesInstallerFeed } from '../cloud/upgrade-feed-migration.mjs';
+import { confirmPreviewMigrationMirror, loadVerifiedUpgradeArtifacts } from '../cloud/upgrade-artifacts.mjs';
 import { createCloudflareUpgradeAdapter } from '../cloud/upgrade-cloudflare.mjs';
 import { ensureEnrollmentAccessRoutes, inspectEnrollmentUpgradeReadiness } from '../cloud/upgrade-enrollment-readiness.mjs';
 import { createUpgradeJournal, readUpgradeJournal } from '../cloud/upgrade-journal.mjs';
@@ -35,8 +36,9 @@ export async function upgradeManagementFromCommand({
   const d1 = by.get('TICKETS');
   const doBinding = by.get('PROVISIONER_OAUTH');
   const currentVersion = plain('NODRELAY_RELEASE_VERSION');
-  if (version.id !== live.version_id || !signed?.feed ||
-      plain('NODRELAY_UPGRADE_CHANNEL') !== signed.channel || plain('NODRELAY_UPGRADE_FEED') !== signed.feed ||
+  const liveFeed = plain('NODRELAY_UPGRADE_FEED');
+  if (version.id !== live.version_id || !matchesInstallerFeed(liveFeed, signed) ||
+      plain('NODRELAY_UPGRADE_CHANNEL') !== signed.channel ||
       plain('NODRELAY_UPGRADE_PUBLIC_KEY') !== signed.publicKey ||
       !versionPattern.test(currentVersion ?? '') || (signed.channel === 'preview') !== currentVersion.includes('-preview.') ||
       plain('APP_ORIGIN') !== spec.origin || plain('OWNER_EMAIL') !== spec.ownerEmail ||
@@ -70,10 +72,17 @@ export async function upgradeManagementFromCommand({
     throw new Error('Cloudflare 正在运行的版本与最近上传的版本不同。为避免继承错误配置，本次未上传或切换。');
   }
   const publicKey = await crypto.subtle.importKey('spki', Buffer.from(signed.publicKey, 'base64url'),
-    'Ed25519', false, ['verify']);
+    'Ed25519', true, ['verify']);
+  const feedOptions = { channel: signed.channel, publicKey, currentVersion, request };
   const { release, artifact, manifestSha256 } = await loadVerifiedUpgradeArtifacts({
-    base: signed.feed, channel: signed.channel, publicKey, currentVersion, request, allowCurrent: true, format: 'auto',
+    ...feedOptions, base: signed.feed, allowCurrent: true, format: 'auto',
   });
+  if (liveFeed !== signed.feed) {
+    if (release.feedMigration?.from !== liveFeed || release.feedMigration.to !== signed.feed || release.version === currentVersion) {
+      throw new Error('新升级源没有适用于此预览管理台的签名迁移版本，未更改管理台。');
+    }
+    await confirmPreviewMigrationMirror(manifestSha256, feedOptions);
+  }
   if (release.version === currentVersion) return { currentVersion };
   ui?.note?.(`v${currentVersion} → v${release.version}。保留域名、登录、数据库和已接入设备。`, '管理台升级');
   if (release.schema === 2) {

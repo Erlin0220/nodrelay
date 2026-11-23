@@ -4,6 +4,7 @@ import { basename, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { validateSignedEnrollmentRelease } from '../cloud/upgrade-enrollment-release.mjs';
+import { legacyPreviewFeed, normalizeFeedMigration, publicPreviewFeed } from '../cloud/upgrade-feed-migration.mjs';
 import { verifyUpgradeRelease } from '../cloud/upgrade-plan.mjs';
 import { readPrivateFile } from '../src/private-directory.mjs';
 import { verifyPublishedArchive } from './release-archive.mjs';
@@ -11,15 +12,17 @@ import { verifyPublishedArchive } from './release-archive.mjs';
 const hex = bytes => createHash('sha256').update(bytes).digest('hex');
 
 // Release engineering entry point only. The production CLI never accepts a custom fetch.
-export async function signWebUpgrade({ worker, keyFile, version, minimumVersion, channel, output, enrollmentCatalog,
+export async function signWebUpgrade({ worker, keyFile, version, minimumVersion, channel, output, enrollmentCatalog, migratePreviewFeed = false,
   request = fetch, issued = Date.now() }) {
   const bundle = await readFile(worker);
   const workerSha256 = hex(bundle);
   const format = enrollmentCatalog === undefined ? 1 : 2;
+  if (migratePreviewFeed && format !== 2) throw new Error('Preview feed migration requires a signed enrollment catalog');
+  const migration = migratePreviewFeed && normalizeFeedMigration({ from: legacyPreviewFeed, to: publicPreviewFeed }, channel);
   const release = {
     schema: format, product: 'nodrelay-management', channel, version, minimumVersion,
     issuedAt: new Date(issued).toISOString(), expiresAt: new Date(issued + 30 * 86400_000).toISOString(),
-    workerBundle: 'worker.js', workerSha256,
+    workerBundle: 'worker.js', workerSha256, ...(migration && { feedMigration: migration }),
   };
   if (format === 2) {
     const catalog = JSON.parse(await readFile(enrollmentCatalog, 'utf8'));
@@ -56,10 +59,10 @@ export async function signWebUpgrade({ worker, keyFile, version, minimumVersion,
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-  const { values, positionals } = parseArgs({ allowPositionals: true, options: { 'enrollment-catalog': { type: 'string' } } });
+  const { values, positionals } = parseArgs({ allowPositionals: true, options: { 'enrollment-catalog': { type: 'string' }, 'migrate-preview-feed': { type: 'boolean' } } });
   if (positionals.length !== 6) {
-    throw new Error('Usage: node packaging/sign-web-upgrade.mjs WORKER_JS PRIVATE_KEY VERSION MINIMUM_VERSION CHANNEL NEW_DIRECTORY [--enrollment-catalog RELEASE_JSON]');
+    throw new Error('Usage: node packaging/sign-web-upgrade.mjs WORKER_JS PRIVATE_KEY VERSION MINIMUM_VERSION CHANNEL NEW_DIRECTORY [--enrollment-catalog RELEASE_JSON] [--migrate-preview-feed]');
   }
   const [worker, keyFile, version, minimumVersion, channel, output] = positionals;
-  await signWebUpgrade({ worker, keyFile, version, minimumVersion, channel, output, enrollmentCatalog: values['enrollment-catalog'] });
+  await signWebUpgrade({ worker, keyFile, version, minimumVersion, channel, output, enrollmentCatalog: values['enrollment-catalog'], migratePreviewFeed: values['migrate-preview-feed'] });
 }

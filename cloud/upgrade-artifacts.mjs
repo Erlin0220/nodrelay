@@ -1,3 +1,4 @@
+import { legacyPreviewMigrationMirror } from './upgrade-feed-migration.mjs';
 import { verifyUpgradeRelease } from './upgrade-plan.mjs';
 
 const maxBytes = { manifest: 64 * 1024, signature: 64, worker: 8 * 1024 * 1024 };
@@ -81,5 +82,16 @@ export async function loadVerifiedUpgradeArtifacts({
     // running until its deadline after this request has already failed.
     transfer.abort();
     throw error;
+  }
+}
+
+// Keep the existing schema-1 preview feed, and its absent schema-2 path,
+// unchanged for the deployed preview.15 Worker until the command migrates it.
+export async function confirmPreviewMigrationMirror(expectedDigest, options) {
+  const mirror = await loadVerifiedUpgradeArtifacts({
+    ...options, base: legacyPreviewMigrationMirror, format: 2,
+  });
+  if (mirror.manifestSha256 !== expectedDigest) {
+    throw new Error('The signed preview migration does not match at both locations');
   }
 }

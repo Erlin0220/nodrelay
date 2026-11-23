@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { enrollmentUpgradeAccessPaths } from '../cloud/upgrade-enrollment-release.mjs';
+import { legacyPreviewFeed, publicPreviewFeed } from '../cloud/upgrade-feed-migration.mjs';
 import { confirmRecordedDeployment, runUpgradeOperation } from '../cloud/upgrade-operation.mjs';
 
 const activeVersion = '11111111-2222-3333-4444-555555555555';
@@ -42,16 +43,20 @@ const release = { schema: 1, product: 'nodrelay-management', channel: 'stable', 
   issuedAt: '2026-11-19T12:00:00.000Z', expiresAt: '2026-12-19T12:00:00.000Z', workerBundle: 'worker.js',
   workerSha256: createHash('sha256').update(bundle).digest('hex') };
 const key = await crypto.subtle.generateKey('Ed25519', false, ['sign', 'verify']);
+const testPublicKey = Buffer.from(await crypto.subtle.exportKey('spki', key.publicKey)).toString('base64url');
 const manifest = Buffer.from(JSON.stringify(release));
 const signature = new Uint8Array(await crypto.subtle.sign('Ed25519', key.privateKey, manifest));
 const artifact = { bundle, manifest, signature, publicKey: key.publicKey, channel: 'stable' };
 
 function fixture({ failUpload, failDeploy, staleBeforeUpload, staleAfterUpload, staleAfterDeploy, wrongCandidate,
-  runtimeDrift, bindingDrift, activeDrift, failGuard, initialJournal, format2 = false } = {}) {
+  runtimeDrift, bindingDrift, activeDrift, failGuard, initialJournal, format2 = false, feed } = {}) {
   const log = [];
   const before = format2 ? structuredClone(active) : active;
   if (format2) before.bindings.find(b => b.name === 'RELEASE_CATALOG').text =
     JSON.stringify({ old: { version: '0.1.5', url: 'https://legacy.example.test/device.tgz', sha256: 'f'.repeat(64) } });
+  if (format2 && feed) before.bindings.push(...Object.entries({
+    NODRELAY_UPGRADE_FEED: feed, NODRELAY_UPGRADE_CHANNEL: 'preview', NODRELAY_UPGRADE_PUBLIC_KEY: testPublicKey,
+  }).map(([name, text]) => ({ name, type: 'plain_text', text })));
   let uploadedBindings;
   let staged = false, rolled = false, state = initialJournal, locked = false, checks = 0, guards = 0;
   const journal = {
@@ -300,4 +305,43 @@ test('schema 2 requires exact owner-approved signed bytes and provider readiness
   await confirmRecordedDeployment({ expected, operationId, api: lost.api, journal: lost.journal });
   assert.equal(lost.state().phase, 'confirmed');
   assert.equal(lost.log.filter(([name]) => name === 'deploy').length, 1);
+});
+
+test('signed preview feed migration preserves legacy devices and reconciles a lost rollout response exactly once', async () => {
+  const releases = Object.fromEntries(['macos-arm64', 'linux-x64', 'windows-x64'].map(platform =>
+    [platform, { version: '0.1.6', url: 'https://signed.example.test/v0.1.6/' + platform, sha256: 'a'.repeat(64), browser: false }]));
+  const migration = { from: legacyPreviewFeed, to: publicPreviewFeed };
+  const body = Buffer.from(JSON.stringify({ ...release, schema: 2, channel: 'preview', version: '0.1.6-preview.1',
+    feedMigration: migration, enrollment: { protocol: 'intent-v1', releases } }));
+  const signature = new Uint8Array(await crypto.subtle.sign('Ed25519', key.privateKey, body));
+  const v2 = { ...artifact, channel: 'preview', manifest: body, signature, format: 2 };
+  const manifestSha256 = createHash('sha256').update(body).digest('hex');
+  const enrollmentApproval = { manifestSha256, inspect: async () => ({
+    verifiedD1: true, exactAccessRoutes: Object.fromEntries(enrollmentUpgradeAccessPaths.map(path => [path, true])),
+  }) };
+  const lost = fixture({ format2: true, failDeploy: true, feed: legacyPreviewFeed });
+  await assert.rejects(lost.run({ artifact: v2, enrollmentApproval }), { code: 'deployment_unconfirmed' });
+  const upload = lost.log.find(([name]) => name === 'upload')[1];
+  const binding = name => upload.bindings.find(entry => entry.name === name);
+  assert.deepEqual(binding('NODRELAY_UPGRADE_FEED'), {
+    name: 'NODRELAY_UPGRADE_FEED', type: 'plain_text', text: publicPreviewFeed,
+  });
+  for (const name of ['TICKETS', 'PROVISIONER_OAUTH', 'ACCESS_AUD', 'RELEASE_CATALOG', 'NODRELAY_UPGRADE_PUBLIC_KEY']) {
+    assert.deepEqual(binding(name), { name, type: 'inherit' });
+  }
+  assert.equal(lost.state().migratesFeed, true);
+  const wrongRead = { ...lost.api, async readVersion(target, id) {
+    const read = await lost.api.readVersion(target, id);
+    if (id === candidateVersion) read.bindings.find(b => b.name === 'NODRELAY_UPGRADE_FEED').text = legacyPreviewFeed;
+    return read;
+  } };
+  await assert.rejects(confirmRecordedDeployment({ expected, operationId, api: wrongRead, journal: lost.journal }),
+    /bindings do not match/);
+  await confirmRecordedDeployment({ expected, operationId, api: lost.api, journal: lost.journal });
+  assert.equal(lost.state().phase, 'confirmed');
+  assert.equal(lost.log.filter(([name]) => name === 'deploy').length, 1);
+
+  const foreign = fixture({ format2: true, feed: 'https://foreign.example.test/updates/' });
+  await assert.rejects(foreign.run({ artifact: v2, enrollmentApproval }), { code: 'target_drift' });
+  assert.equal(foreign.log.some(([name]) => name === 'upload' || name === 'deploy'), false);
 });

@@ -1,3 +1,4 @@
+import { matchesInstallerFeed } from '../cloud/upgrade-feed-migration.mjs';
 import { createHash, randomBytes } from 'node:crypto';
 import { readFile, rename, rm } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -649,7 +650,7 @@ export async function deployManagement(ui, release, grant, zone, profileEmail, n
         if (release.webUpgrade && completeBaseline && !pendingBaseline &&
             (bindings.get('NODRELAY_UPGRADE_CHANNEL') !== release.webUpgrade.channel ||
              bindings.get('NODRELAY_UPGRADE_PUBLIC_KEY') !== release.webUpgrade.publicKey ||
-             bindings.get('NODRELAY_UPGRADE_FEED') !== release.webUpgrade.feed ||
+             !matchesInstallerFeed(bindings.get('NODRELAY_UPGRADE_FEED'), release.webUpgrade) ||
              !/^(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})\.(0|[1-9]\d{0,8})(?:-preview\.(0|[1-9]\d{0,8}))?$/.test(bindings.get('NODRELAY_RELEASE_VERSION') ?? '') ||
              (release.webUpgrade.channel === 'stable' && bindings.get('NODRELAY_RELEASE_VERSION').includes('-preview.')))) {
           throw new Error('原管理台的网页升级配置与当前签名安装包不一致。未覆盖原配置。');
