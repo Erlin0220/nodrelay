@@ -11,6 +11,10 @@ import { promisify } from 'node:util';
 const exec = promisify(execFile);
 const maximumArchiveBytes = 1024 ** 3;
 const archiveInspectionOptions = { timeout: 60000 };
+// Git Bash may put GNU tar ahead of Windows' libarchive. GNU tar treats
+// drive-letter paths as remote archive addresses and cannot write ZIP files.
+export const archiveTar = process.platform === 'win32'
+  ? join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe') : 'tar';
 export const browserEntryPoints = ['setup.mjs', 'preflight.mjs'];
 export const tarOwnership = process.platform === 'linux'
   ? ['--numeric-owner', '--owner=0', '--group=0']
@@ -55,7 +59,7 @@ async function downloadArchive(asset, output, request, maxBytes) {
 
 async function inspectArchive(platform, asset, filename, zip, intent) {
   const useUnzip = zip && process.platform !== 'win32';
-  const command = useUnzip ? 'unzip' : process.platform === 'win32' ? 'tar.exe' : 'tar';
+  const command = useUnzip ? 'unzip' : archiveTar;
   // GNU tar warns for each macOS/libarchive PAX provenance header. A valid
   // release can exceed execFile's stderr limit before the manifest is returned.
   // Suppress only that warning category; keep all tar errors and exit status.

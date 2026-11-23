@@ -5,7 +5,7 @@ import { copyFile, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promi
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
-import { verifyPublishedArchive } from './release-archive.mjs';
+import { archiveTar, verifyPublishedArchive } from './release-archive.mjs';
 
 const run = promisify(execFile);
 const nodeVersion = '24.22.3';
@@ -50,10 +50,9 @@ try {
   ]);
   const upstream = join(temp, 'upstream'), legacy = join(temp, 'legacy');
   await Promise.all([mkdir(upstream), mkdir(legacy)]);
-  const tar = windows ? 'tar.exe' : 'tar';
   const quietPax = process.platform === 'linux' ? ['--warning=no-unknown-keyword'] : [];
-  await run(tar, ['-xf', vendor, '-C', upstream], { timeout: 120000 });
-  await run(tar, [...quietPax, '-xf', previous, '-C', legacy], { timeout: 240000 });
+  await run(archiveTar, ['-xf', vendor, '-C', upstream], { timeout: 120000 });
+  await run(archiveTar, [...quietPax, '-xf', previous, '-C', legacy], { timeout: 240000 });
   const node = join(upstream, nodeFolder, ...(windows ? ['node.exe'] : ['bin', 'node']));
   const cloudflared = join(legacy, 'bin', windows ? 'cloudflared.exe' : 'cloudflared');
   const personal = join(legacy, 'personal');

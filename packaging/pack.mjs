@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import { targetPlatforms } from '../src/setup-core.mjs';
 import { localInstallerName, writeLocalInstaller } from './local-installer.mjs';
 import { verifyNativeTarget } from './native-target.mjs';
-import { browserEntryPoints, tarOwnership } from './release-archive.mjs';
+import { archiveTar, browserEntryPoints, tarOwnership } from './release-archive.mjs';
 
 const exec = promisify(execFile);
 const input = process.argv[2];
@@ -140,9 +140,9 @@ try {
   }));
   await mkdir(dirname(spec.output), { recursive: true });
   const options = { cwd: stage, maxBuffer: 262144, env: { ...process.env, COPYFILE_DISABLE: '1' } };
-  if (windows && process.platform === 'win32') await exec('tar.exe', ['-caf', spec.output, ...tarOwnership, '.'], options);
+  if (windows && process.platform === 'win32') await exec(archiveTar, ['-caf', spec.output, ...tarOwnership, '.'], options);
   else if (windows) await exec('zip', ['-Xqr', spec.output, '.'], options);
-  else await exec('tar', ['-czf', spec.output, ...tarOwnership, '.'], options);
+  else await exec(archiveTar, ['-czf', spec.output, ...tarOwnership, '.'], options);
   const digest = await sha256(spec.output);
   const localInstaller = spec.localInstaller === true ? await writeLocalInstaller(spec.platform, spec.output, digest) : {};
   console.log(JSON.stringify({ platform: spec.platform, version: spec.version, file: basename(spec.output),
