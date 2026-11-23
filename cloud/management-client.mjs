@@ -1107,7 +1107,7 @@ const consoleDeviceDetails = String.raw`
     detailConfirm.disabled = false;
     detailConfirm.textContent = action === 'disable' ? '确认停用' : action === 'intent-revoke' ? '确认撤销命令' : '确认取消票据';
     showField('registration', row.querySelector('.state').textContent);
-    for (const field of ['checked', 'tunnel', 'mcp', 'browser', 'release', 'revocation', 'server']) showField(field);
+    for (const field of ['checked', 'tunnel', 'mcp', 'browser', 'servers', 'release', 'revocation', 'server']) showField(field);
     detailFeedback.textContent = {
       disable: '停用将撤销该设备的安装票据、Tunnel 凭据和 Portal 路由。',
       cancel: '取消后，这台设备未使用的安装票据将失效。',
@@ -1126,6 +1126,9 @@ const consoleDeviceDetails = String.raw`
       const browser = data.mcpProfiles?.browser;
       showField('mcp', describe(mcpLabels[development] ?? development, data.mcpDiagnostics?.development));
       showField('browser', describe(mcpLabels[browser] ?? browser, data.mcpDiagnostics?.browser));
+      // Local MCP servers this device offers through the Portal, besides DevSpace.
+      showField('servers', Array.isArray(data.mcpServers) && data.mcpServers.length
+        ? data.mcpServers.map(server => server.name + '（' + (mcpLabels[server.state] ?? server.state) + '）').join('、') : '');
       showField('release', data.release);
       showField('revocation', data.revocation && (data.revocation === 'complete' ? '已完成' : '尚未完成'));
       showField('server', data.serverIds?.join(' · '));

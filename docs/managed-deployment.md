@@ -250,6 +250,44 @@ observed state in the device's private `connection-status.json`.
 The Local DevSpace Control Center remains the owner of local workspaces
 and execution.
 
+## Local MCP servers
+
+Each device instance keeps its MCP list in `mcp.json` beside its private
+adapter configuration (`nodrelay mcp path` prints it). The format is the
+`mcpServers` object used by Claude Desktop, Cursor and VS Code: `command`,
+`args`, `env` and `cwd` start a stdio server; `url` with optional `headers`
+and `type: "sse"` reach a server that listens on this computer only
+(`127.0.0.1`, `localhost` or `[::1]`). Nodrelay adds `tools.allow`,
+`tools.deny` and `disabled`. Names are 2–24 lowercase letters, digits or
+hyphens; at most 16 servers are enabled at once. The file must be private to
+the device user, as the other instance files are.
+
+`nodrelay mcp add` resolves a bare command such as `npx` to its absolute path
+and records the current shell's `PATH`, because the device service starts
+with the operating system's minimal environment. `nodrelay mcp import` copies
+valid entries from another client's file and explains each one it skips.
+
+The development adapter serves each enabled server at `/mcp/<name>` with the
+device's Portal token, starts stdio servers on first use, restarts one whose
+settings change, and stops one that is removed or disabled. Their standard
+error goes to the instance's `service.log`. An invalid edit keeps the last
+valid list in service and is reported by `nodrelay mcp list`.
+
+On every activation check the device service sends the enabled names. The
+Worker routes `/mcp/<name>` on the device hostname to the development adapter,
+checks an MCP handshake and tool listing for each new name through the Tunnel,
+then registers an MCP server `<unique>-m-<name>` with the same bearer token
+and adds it to the Portal. A server that fails the check is reported as
+pending and retried every 15 seconds. Names the device stops reporting are
+removed from the Portal. The console never writes `mcp.json` and has no way to
+make a device run a new command; it can show each server's state and disable
+the whole device. A device that does not report a list (an older package)
+keeps its existing registrations, and its DevSpace route is unchanged.
+
+The Portal keeps tools from different servers apart and lets each user switch
+single servers on or off. Tool calls still end at 60 seconds; the adapter
+answers before that.
+
 ## Domain and network choices
 
 | Layer | Supported production plan |

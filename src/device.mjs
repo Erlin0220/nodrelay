@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
+import { dirname, join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { createMcpExpressApp } from '@modelcontextprotocol/sdk/server/express.js';
@@ -9,6 +10,8 @@ import { commandFingerprint, commandJournal, commandOperationId, commandSchema }
 import { loadConfig, profiles } from './config.mjs';
 import { processId, processResult, processSchema, workspaceId, workspaceResult } from './device-handles.mjs';
 import { discoverLocalTools, localMcp } from './local-mcp.mjs';
+import { mcpNamePattern } from './mcp-config.mjs';
+import { createMcpHub } from './mcp-proxy.mjs';
 
 const HOST = '127.0.0.1';
 const markerFile = 'portal-probe.txt';
@@ -97,7 +100,7 @@ async function probe(config, client, args, signal) {
   return { content: [{ type: 'text', text: JSON.stringify(evidence) }], structuredContent: evidence };
 }
 
-export function createDeviceApp(config) {
+export function createDeviceApp(config, { hub } = {}) {
   const { path, tools, optional = [] } = profiles[config.profile];
   const allowedTools = [...tools, ...optional];
   const upstream = upstreamConnection(config, tools, allowedTools);
@@ -106,18 +109,38 @@ export function createDeviceApp(config) {
   app.disable('x-powered-by');
   app.enable('case sensitive routing');
   app.enable('strict routing');
-  app.all(path, async (req, res) => {
+  // Every Portal route uses the device's Portal token and refuses browser
+  // origins and anything but POST.
+  const admitted = (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     const suppliedToken = /^Bearer ([A-Za-z0-9_-]{43})$/.exec(req.headers.authorization ?? '')?.[1];
     if (!suppliedToken || !timingSafeEqual(Buffer.from(suppliedToken), Buffer.from(config.portalToken))) {
       res.setHeader('WWW-Authenticate', 'Bearer');
-      return res.sendStatus(401);
+      res.sendStatus(401);
+      return false;
     }
-    if (req.headers.origin) return res.sendStatus(403);
+    if (req.headers.origin) {
+      res.sendStatus(403);
+      return false;
+    }
     if (req.method !== 'POST') {
       res.setHeader('Allow', 'POST');
-      return res.sendStatus(405);
+      res.sendStatus(405);
+      return false;
     }
+    return true;
+  };
+  // Any local MCP configured on this device, at /mcp/<name>.
+  const mcpHub = config.profile === 'development' && (hub ?? (config.mcpConfigFile && createMcpHub(config.mcpConfigFile)));
+  if (mcpHub) {
+    app.all('/mcp/:name', async (req, res) => {
+      if (!admitted(req, res)) return;
+      if (!mcpNamePattern.test(req.params.name)) return res.sendStatus(404);
+      await mcpHub.handle(req.params.name, req, res);
+    });
+  }
+  app.all(path, async (req, res) => {
+    if (!admitted(req, res)) return;
 
     const server = new Server({ name: `${config.deviceId}-${config.profile}`, version: '0.1.0' },
       { capabilities: { tools: {} } });
@@ -228,6 +251,8 @@ export async function bindDeviceLoopback(app, requestedPort) {
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   try {
     const config = await loadConfig(process.argv[2]);
+    // The MCP list lives beside the adapter's own private configuration.
+    if (config.profile === 'development') config.mcpConfigFile = join(dirname(resolve(process.argv[2])), 'mcp.json');
     const opened = await bindDeviceLoopback(createDeviceApp(config), config.port).catch(() => null);
     if (!opened) {
       console.error('Could not open the configured loopback listener');

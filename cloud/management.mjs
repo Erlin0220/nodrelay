@@ -187,7 +187,7 @@ export async function manage(request, env, url, { limitedBody, html, json, asset
       try { input = JSON.parse(await limitedBody(request)); }
       catch { return json({ error: 'Invalid request' }, 400); }
       const token = /^Bearer (.+)$/.exec(request.headers.get('Authorization') ?? '')?.[1];
-      const result = await devices.activate(input?.deviceId, token);
+      const result = await devices.activate(input?.deviceId, token, input?.servers);
       return json(result, result.status === 'revoked' ? 410 : 200);
     }
     if (request.headers.get('Origin') !== url.origin) return json({ error: 'Invalid origin' }, 403);

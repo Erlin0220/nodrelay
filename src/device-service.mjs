@@ -1,8 +1,9 @@
 import { spawn } from 'node:child_process';
-import { closeSync, openSync } from 'node:fs';
+import { closeSync, openSync, unwatchFile, watchFile } from 'node:fs';
 import { rename, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { checkConnection, monitorConnection } from './device-connection.mjs';
+import { enabledMcpNames } from './mcp-proxy.mjs';
 import { assertPrivateFile, readPrivateFile } from './private-directory.mjs';
 import { validateCredentials } from '../cloud/tickets.mjs';
 
@@ -79,8 +80,25 @@ for (const profile of ['development', ...(credentials.browserToken ? ['browser']
 }
 run(config.cloudflared, ['tunnel', '--no-autoupdate', 'run', '--token-file', tunnelToken]);
 
+// The adapter serves the device's mcp.json; this process tells the console
+// which servers it offers. An edit wakes the next check instead of waiting
+// for the regular interval.
+const mcpFile = join(dir, 'mcp.json');
+let wake = () => {};
+const sleep = (ms, signal) => new Promise((resolve, reject) => {
+  const abort = () => { clearTimeout(timer); reject(Object.assign(new Error('Stopped'), { name: 'AbortError' })); };
+  const done = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); wake = () => {}; resolve(); };
+  const timer = setTimeout(done, ms);
+  wake = done;
+  signal.addEventListener('abort', abort, { once: true });
+});
+watchFile(mcpFile, { interval: 2000, persistent: false }, () => wake());
+stopped.signal.addEventListener('abort', () => unwatchFile(mcpFile), { once: true });
+
 try {
-  const state = await monitorConnection(config, credentials.activationToken, stopped.signal, { report: reportConnection });
+  const state = await monitorConnection(config, credentials.activationToken, stopped.signal, {
+    report: reportConnection, sleep, servers: () => enabledMcpNames(mcpFile),
+  });
   if (state === 'revoked') stop();
 } catch {
   stop(true);

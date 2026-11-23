@@ -1,44 +1,39 @@
 <p align="center">
-  <img src="assets/nodrelay-neon.webp" alt="Nodrelay" width="640" />
+  <img src="assets/nodrelay-neon.webp" alt="Nodrelay" width="560" />
 </p>
 
-<h1 align="center">Nodrelay</h1>
+# Nodrelay
 
-<p align="center">Reach every Personal DevSpace device through one Cloudflare MCP Portal.</p>
+English | [简体中文](README_zh-cn.md)
 
-<p align="center"><a href="README.md">English</a> · <a href="README_zh-cn.md">简体中文</a></p>
+Nodrelay is a self-hosted relay for local MCP servers. It connects the MCP servers on any computer (stdio servers started by a command, or HTTP servers listening only on that computer) to **one** Cloudflare MCP Portal through Cloudflare Tunnel. Your MCP client connects to that single address and uses the MCP servers on every computer you have set up.
 
-> **Preview.** Nodrelay is under active development. Interfaces and package formats may still change between versions. Read [Status](#status) before relying on it.
+Nodrelay lets remote clients call tools on your computers, which can include reading and writing files and running commands. Deploy it only on computers you own or are authorized to manage, and restrict the Portal's Access policy to yourself. You are responsible for how you deploy and use it; the developers accept no liability for unauthorized access, command execution or other misuse and its consequences.
 
-## What it is
+[Documentation](docs/managed-deployment.md) · [Releases](https://github.com/Erlin0220/nodrelay/releases) · [Report a security issue](SECURITY.md)
 
-Nodrelay has two parts:
+## Features
 
-- **Management console**: a Cloudflare Worker with D1 that you deploy into *your own* Cloudflare account. It gives each device its own Tunnel and credentials, issues install commands, shows connection state, and revokes access.
-- **Device service**: a small service on each macOS, Windows or Linux machine. It connects that machine's Personal DevSpace Runtime to the Portal through the device's Tunnel.
+- **One Portal, many computers:** each computer has its own Tunnel and credentials. The Portal keeps tools apart per computer and MCP server, and clients can switch single servers on or off.
+- **Any local MCP:** stdio servers started by `command`, plus local HTTP and SSE servers, in the same format Claude Desktop, Cursor and VS Code use, so existing entries import as they are.
+- **Configuration stays on the computer:** which MCP servers and tools a computer offers is decided on that computer. The console can show and disable them but cannot add or change the commands a computer runs.
+- **Self-hosted:** the console is a Worker and D1 database in your own Cloudflare account, with no third-party server in between. Computers never sign in to Cloudflare.
+- **One-line install:** one command each for macOS, Linux and Windows. Install codes never expire, work once and can be revoked.
+- **DevSpace built in:** Personal DevSpace (workspaces, file edits, commands) works out of the box.
 
-Your MCP client (ChatGPT, Claude, Cursor, VS Code, …) connects to one Portal address and works on whichever device you choose: open a workspace, read and patch files, run commands.
+## Quick start
 
-```text
-Admin      → Cloudflare Access → Nodrelay console (Worker + D1)
-MCP client → Cloudflare MCP Portal → device Tunnel → device service → Personal Runtime
-```
-
-Nothing runs on servers other than your own Cloudflare account and your own devices. Devices never sign in to Cloudflare.
-
-## Install
-
-### 1. Deploy the management console (macOS)
+### 1. Deploy the console (on a Mac)
 
 ```zsh
 zsh <(curl -fsSL https://github.com/Erlin0220/nodrelay-downloads/releases/download/v0.1.1/install-macos.sh)
 ```
 
-A browser window opens for Cloudflare authorization. Then pick an account and a domain with the arrow keys. The installer deploys the Worker, D1, Access and the MCP Portal, confirms each step through the Cloudflare API, and opens the console. You need a Cloudflare account with an active domain. To check the launcher before running it, use the [command with its pinned SHA-256](https://github.com/Erlin0220/nodrelay-downloads/releases/download/v0.1.1/install-macos-command.txt).
+Authorize Cloudflare in the browser that opens, then pick an account and a domain with the arrow keys. The installer deploys the Worker, D1, Access and the MCP Portal, confirms each step through the Cloudflare API, and opens the console. The account needs an active domain.
 
-### 2. Add a device
+### 2. Connect a computer
 
-In the console, choose **Add device** and give it a name (up to 20 characters). Choose **Install command** on its row and copy the command for that device's system:
+In the console choose **Add device** and name it, then **Install command** on its row. Copy the command for that computer's system and run it there:
 
 ```sh
 # macOS
@@ -48,41 +43,77 @@ bash <(curl -fsSL https://raw.githubusercontent.com/Erlin0220/nodrelay/refs/head
 ```
 
 ```bat
-# Windows (cmd or PowerShell)
+:: Windows (cmd or PowerShell)
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "try { iwr 'https://raw.githubusercontent.com/Erlin0220/nodrelay/refs/heads/main/install.ps1' -UseBasicParsing -OutFile 'nodrelay-install.ps1' -ErrorAction Stop; & '.\nodrelay-install.ps1' '-e' 'https://<console>' '-t' '<code>' } catch { throw }"
 ```
 
-[`install.sh`](install.sh) and [`install.ps1`](install.ps1) contain no credentials. They ask your console for the installer pinned to that device; the installer downloads the approved package, verifies its SHA-256 and installs the service. An install code does not expire, works once, and can be revoked from the console. Treat it like a password until it is used.
+### 3. Add the MCP servers on that computer
 
-### 3. Connect an MCP client
+The installer prints where its `nodrelay` command is (`~/.devspace-fleet/<instance>/nodrelay`):
 
-Add the Portal address shown in the console (`https://<portal>/mcp`) to your MCP client and sign in with Cloudflare Access. To allow a client's OAuth callback, use **Client callbacks** in the console.
+```sh
+# An MCP server started by a command
+nodrelay mcp add files --allow read_text_file,list_directory,search_files -- npx -y @modelcontextprotocol/server-filesystem ~/Documents
+# A local HTTP MCP server
+nodrelay mcp add notes --url http://127.0.0.1:3000/mcp --header 'Authorization: Bearer <token>'
+# Import an existing configuration
+nodrelay mcp import ~/Library/Application\ Support/Claude/claude_desktop_config.json
+# Check registration
+nodrelay mcp list
+```
+
+They appear in the Portal within seconds. You can also edit the `mcp.json` shown by `nodrelay mcp path`:
+
+```json
+{
+  "mcpServers": {
+    "files": {
+      "command": "/opt/homebrew/bin/npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/Users/me/Documents"],
+      "tools": { "allow": ["read_text_file", "list_directory", "search_files"] }
+    },
+    "notes": { "url": "http://127.0.0.1:3000/mcp", "headers": { "Authorization": "Bearer …" } }
+  }
+}
+```
+
+`tools.allow` and `tools.deny` limit the tools offered, and `"disabled": true` pauses a server. A `url` must point to this computer; add remote MCP servers to the Cloudflare MCP Portal directly.
+
+### 4. Connect an MCP client
+
+Add the Portal address shown in the console, `https://<portal>/mcp`, to ChatGPT, Claude, Cursor, VS Code or another client and sign in with Cloudflare Access.
+
+## How it works
+
+```text
+MCP client → Cloudflare MCP Portal (Access login)
+              ├─ Office Mac · files    ─┐
+              ├─ Office Mac · devspace ─┼─ Tunnel → Nodrelay device service → local MCP (stdio / HTTP)
+              └─ Home PC · notes       ── Tunnel → Nodrelay device service → local MCP
+Admin      → Cloudflare Access → Nodrelay console (Worker + D1)
+```
+
+The device service listens only on loopback and serves each MCP server at `/mcp/<name>`. Each computer regularly reports the servers it offers; the console registers a server in the Portal only after its MCP handshake succeeds through the Tunnel, and removes it when the computer removes or disables it.
 
 ## Upgrade
 
-- **Console:** use the upgrade icon next to the logo, which appears only when a verified newer release exists, or run the step 1 command again. Both keep your domain, database, login, Portal and enrolled devices.
-- **Devices:** follow the [update and recovery guide](docs/device-recovery.md).
+- **Console:** use the upgrade icon next to the logo when it appears, or run the step 1 command again. Both keep the domain, database, login, Portal and connected computers.
+- **Computers:** see [update and recovery](docs/device-recovery.md).
 
 ## Status
+
+Preview: interfaces and package formats may change.
 
 | Platform | State |
 | --- | --- |
 | macOS Apple Silicon | Installation, Tunnel and Portal tool calls verified |
 | Windows x64 | Installation, repair, Tunnel and Portal tool calls verified |
 | Linux x64 | Installed and reached over its Tunnel on Ubuntu 22.04 (WSL2); Portal calls on a standalone host pending |
-| macOS Intel, Linux arm64 | Packaging supported; public packages and acceptance pending |
+| macOS Intel, Linux arm64 | Packaging supported; public packages pending |
 
-Known limits:
-
-- The device service runs as the signed-in user: a LaunchAgent on macOS, an interactive scheduled task on Windows, and a systemd user service on Linux. For unattended Linux hosts, enable user lingering.
-- A Nodrelay console needs a domain in your Cloudflare account. Device Tunnels and the MCP Portal are created under it; a `workers.dev` address cannot host them.
-- The public management package uses a Cloudflare OAuth client that only its owning account can authorize. To deploy into another account, build the kit with your own client. See [Cloudflare OAuth client visibility](https://developers.cloudflare.com/fundamentals/oauth/create-an-oauth-client/#private-and-public-clients).
-
-## Documentation
-
-- [Management console on macOS](docs/management-macos.md)
-- [Managed deployment, devices and release gates](docs/managed-deployment.md)
-- [Update and recovery](docs/device-recovery.md)
+- The device service runs as the signed-in user. For unattended Linux hosts, enable user lingering.
+- The console needs a domain in your Cloudflare account; a `workers.dev` address cannot host the Tunnels and Portal.
+- Local MCP servers are new and need the new device package; computers already installed keep offering DevSpace unchanged.
 
 ## Develop
 
@@ -92,14 +123,6 @@ Node.js 24 or later:
 npm ci
 npm test
 ```
-
-To run one device adapter by hand, start from [`docs/device.example.json`](docs/device.example.json) and keep its credentials in an owner-only directory:
-
-```sh
-npm start -- /absolute/private/device.private.json
-```
-
-Report security issues privately as described in [SECURITY.md](SECURITY.md).
 
 ## License
 

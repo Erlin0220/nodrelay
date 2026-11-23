@@ -3,7 +3,7 @@ import { setTimeout as wait } from 'node:timers/promises';
 import { confirmedRevocation } from '../cloud/device-revocation.mjs';
 
 export async function checkConnection({ manager, deviceId }, token, signal, {
-  request = fetch, timeout = 45000,
+  request = fetch, timeout = 45000, servers,
 } = {}) {
   let response;
   try {
@@ -11,7 +11,9 @@ export async function checkConnection({ manager, deviceId }, token, signal, {
       method: 'POST', redirect: 'error',
       signal: AbortSignal.any([AbortSignal.timeout(timeout), signal]),
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ deviceId }),
+      // The local MCP names this device offers. Omitted when the device's MCP
+      // file is unreadable, so a broken edit never unregisters anything.
+      body: JSON.stringify({ deviceId, ...(servers && { servers }) }),
     });
   } catch {
     return { status: 'unconfirmed', reason: 'network' };
@@ -31,7 +33,12 @@ export async function checkConnection({ manager, deviceId }, token, signal, {
     return { status: 'unconfirmed', reason: 'invalid_response', httpStatus };
   }
   const body = await response.json().catch(() => null);
-  if (httpStatus === 200 && body?.status === 'active') return { status: 'active' };
+  if (httpStatus === 200 && body?.status === 'active') {
+    const reported = Array.isArray(body.servers) ? body.servers.filter(item =>
+      typeof item?.name === 'string' && /^[a-z][a-z0-9-]{1,23}$/.test(item.name) && ['registered', 'pending'].includes(item.status))
+      .map(({ name, status, reason }) => ({ name, status, ...(typeof reason === 'string' && /^[a-z_]{1,40}$/.test(reason) && { reason }) })) : undefined;
+    return { status: 'active', ...(reported && { servers: reported }) };
+  }
   if (httpStatus === 410 && await confirmedRevocation(body, manager, deviceId, token)) return { status: 'revoked' };
   return { status: 'unconfirmed', reason: 'invalid_response', httpStatus };
 }
@@ -40,12 +47,16 @@ export async function monitorConnection(config, token, signal, {
   request = fetch,
   sleep = (ms, currentSignal) => wait(ms, undefined, { signal: currentSignal }),
   report = () => {},
+  // Returns { names } or { error } for the device's MCP file, read each check.
+  servers,
 } = {}) {
   let delay = 1500;
   let previous;
   try {
     while (!signal.aborted) {
-      const current = await checkConnection(config, token, signal, { request });
+      const offered = servers ? await servers() : undefined;
+      const result = await checkConnection(config, token, signal, { request, servers: offered?.names });
+      const current = offered?.error ? { ...result, mcpConfigError: offered.error } : result;
       if (signal.aborted) break;
       const signature = JSON.stringify(current);
       if (signature !== previous) {
@@ -55,7 +66,8 @@ export async function monitorConnection(config, token, signal, {
       if (current.status === 'revoked') return current.status;
       if (current.status === 'active') {
         delay = 1500;
-        await sleep(60000, signal);
+        // A local MCP that has not registered yet is checked again sooner.
+        await sleep(current.servers?.some(server => server.status === 'pending') ? 15000 : 60000, signal);
       } else {
         await sleep(delay, signal);
         delay = Math.min(delay * 2, 30000);

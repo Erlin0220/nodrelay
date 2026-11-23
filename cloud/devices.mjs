@@ -12,6 +12,31 @@ import { devicePattern, issueTicket, protect, ticketCancellation, tokenPattern, 
 const now = () => Math.floor(Date.now() / 1000);
 const randomToken = () => base64url.encode(crypto.getRandomValues(new Uint8Array(32)));
 const tunnelIdPattern = /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/;
+// Local MCP servers a device offers next to its built-in DevSpace route.
+const mcpServerName = /^[a-z][a-z0-9-]{1,23}$/;
+const maxDeviceServers = 16;
+const deviceServersTable = "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'fleet_device_servers'";
+const createDeviceServers = `CREATE TABLE IF NOT EXISTS fleet_device_servers (
+  device_id TEXT NOT NULL REFERENCES fleet_devices(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  PRIMARY KEY (device_id, name))`;
+
+async function registeredServers(db, id) {
+  if (!await db.prepare(deviceServersTable).first()) return [];
+  return (await db.prepare('SELECT name FROM fleet_device_servers WHERE device_id = ? ORDER BY name').bind(id).all()).results.map(row => row.name);
+}
+
+// The names in a device's activation check. Undefined means an older device
+// that does not report a list; its registered servers stay as they are.
+export function reportedServers(value) {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > maxDeviceServers || new Set(value).size !== value.length ||
+      !value.every(name => typeof name === 'string' && mcpServerName.test(name))) {
+    throw new DeviceError('Invalid device MCP list', 400);
+  }
+  return [...value].sort();
+}
+const sameNames = (left, right) => left.length === right.length && left.every((name, index) => name === right[index]);
 
 export class DeviceError extends Error {
   constructor(message, status = 400) { super(message); this.status = status; }
@@ -85,14 +110,30 @@ function identity(spec, row) {
     ...routes[kind], ...(port !== undefined && { port }), kind, token, id: row.unique_name + (kind === 'development' ? '-d' : '-b'),
     url: 'https://' + hostname + routes[kind].path,
   });
-  return { hostname, profile };
+  // A configured local MCP, served by the device's development adapter.
+  const server = (name, token, port) => ({
+    kind: 'mcp', name, path: '/mcp/' + name, port: port ?? routes.development.port, tools: [], token,
+    id: row.unique_name + '-m-' + name, url: 'https://' + hostname + '/mcp/' + name,
+  });
+  return { hostname, profile, server };
 }
 
 function tunnelRules(hostname, profiles) {
-  return [...profiles.map(r => ({
-    hostname, path: '^' + r.path + '$', service: `http://127.0.0.1:${r.port}`,
-    originRequest: { httpHostHeader: `127.0.0.1:${r.port}` },
-  })), { service: 'http_status:404' }];
+  const rule = (path, port) => ({
+    hostname, path, service: `http://127.0.0.1:${port}`, originRequest: { httpHostHeader: `127.0.0.1:${port}` },
+  });
+  const development = profiles.find(r => r.kind === 'development');
+  // One rule routes every /mcp/<name> to the development adapter, which
+  // refuses names its device has not configured.
+  return [...profiles.filter(r => r.kind !== 'mcp').map(r => rule('^' + r.path + '$', r.port)),
+    ...(development ? [rule('^/mcp/[a-z][a-z0-9-]{1,23}$', development.port)] : []), { service: 'http_status:404' }];
+}
+
+async function routeDeviceTunnel(api, account, spec, row, profiles) {
+  const path = `${account}/cfd_tunnel/${row.tunnel_id}`;
+  const tunnel = await api.get(path);
+  if (tunnel?.name !== `${spec.label}-${row.unique_name}`) throw new DeviceError('Tunnel ownership changed', 409);
+  await api.put(path + '/configurations', { config: { ingress: tunnelRules(identity(spec, row).hostname, profiles) } });
 }
 
 async function ensureTunnel(api, account, spec, db, row, profiles) {
@@ -203,7 +244,7 @@ async function verifyRoute(route, request) {
   const listing = await dispatch('tools/list', {}, 2);
   const catalog = (await probeJson(listing))?.result;
   const names = Array.isArray(catalog?.tools) ? catalog.tools.map(tool => tool?.name) : [];
-  if (!route.tools.every(name => names.includes(name))) {
+  if (!Array.isArray(catalog?.tools) || !route.tools.every(name => names.includes(name))) {
     throw probeError('The device did not expose its expected tool catalog', 'catalog_mismatch');
   }
   if (route.kind === 'browser') {
@@ -247,6 +288,44 @@ export function createDevices(env, request = fetch) {
     return [profile('development', tokens.portalToken, tokens.ports?.development),
       ...(tokens.browserToken ? [profile('browser', tokens.browserToken, tokens.ports?.browser)] : [])];
   };
+  const serverRoute = (row, tokens, name) => identity(spec, row).server(name, tokens.portalToken, tokens.ports?.development);
+
+  // Register the local MCP servers a device now reports and drop the ones it
+  // no longer offers. Each new server must answer an MCP handshake through
+  // the device Tunnel first; one that does not stays pending, and the device
+  // asks again on its next check. Built-in routes are unaffected.
+  async function reconcileServers(api, row, tokens, wanted, guard) {
+    const registered = await registeredServers(db, row.id);
+    const removed = registered.filter(name => !wanted.includes(name));
+    const added = wanted.filter(name => !registered.includes(name));
+    const results = new Map(registered.filter(name => wanted.includes(name)).map(name => [name, { name, status: 'registered' }]));
+    if (added.length) await routeDeviceTunnel(api, account, spec, row, deviceRoutes(row, tokens));
+    const accepted = [];
+    for (const name of added) {
+      const route = serverRoute(row, tokens, name);
+      try {
+        await guard();
+        await verifyRoute(route, request);
+        await ensureMcpServer(api, account, spec, route);
+        accepted.push(name);
+        results.set(name, { name, status: 'registered' });
+      } catch (error) {
+        if (!(error instanceof DeviceError)) throw error;
+        results.set(name, { name, status: 'pending', reason: error.reason ?? error.activationCode ?? 'check_failed' });
+      }
+    }
+    if (accepted.length || removed.length) {
+      await guard();
+      await updatePortal(api, account, spec, { add: accepted.map(name => serverRoute(row, tokens, name).id),
+        remove: removed.map(name => serverRoute(row, tokens, name).id) });
+      if (!await db.prepare(deviceServersTable).first()) await db.prepare(createDeviceServers).run();
+      await db.batch([
+        ...removed.map(name => db.prepare('DELETE FROM fleet_device_servers WHERE device_id = ? AND name = ?').bind(row.id, name)),
+        ...accepted.map(name => db.prepare('INSERT OR IGNORE INTO fleet_device_servers (device_id, name) VALUES (?, ?)').bind(row.id, name)),
+      ]);
+    }
+    return wanted.map(name => results.get(name));
+  }
   const run = action => deviceLease(db, (options, guard) =>
     action(cloudflareApi(token, options), guard), request);
   const callbackLabels = async state => {
@@ -404,31 +483,39 @@ export function createDevices(env, request = fetch) {
         return validateCredentials({ deviceId: id, tunnelToken, ...stored });
       });
     },
-    async activate(id, token) {
+    async activate(id, token, reported) {
       validId(id);
+      const wanted = reportedServers(reported);
       const existing = await readDevice(db, id);
       const authorization = await authorized(existing, token);
       if (!authorization) throw new DeviceError('Device activation rejected', 401);
       if (authorization.revocation) return authorization.revocation;
-      if (existing.status === 'active') return { status: 'active' };
+      if (existing.status === 'active') {
+        if (wanted === undefined) return { status: 'active' };
+        if (sameNames(await registeredServers(db, id), wanted)) {
+          return { status: 'active', servers: wanted.map(name => ({ name, status: 'registered' })) };
+        }
+      }
       return run(async (api, guard) => {
         const row = await readDevice(db, id);
         const tokens = await authorized(row, token);
         if (!tokens) throw new DeviceError('Device activation rejected', 401);
         if (tokens.revocation) return tokens.revocation;
-        if (row.status === 'active') return { status: 'active' };
-        if (!row.tunnel_id) throw Object.assign(new DeviceError('Device has no registered Tunnel', 409),
-          { activationCode: 'tunnel_pending' });
-        const profiles = deviceRoutes(row, tokens);
-        await guard();
-        const proofs = await Promise.allSettled(profiles.map(route => verifyRoute(route, request)));
-        const failed = proofs.find(result => result.status === 'rejected');
-        if (failed) throw failed.reason;
-        for (const route of profiles) await ensureMcpServer(api, account, spec, route);
-        await updatePortal(api, account, spec, { add: profiles.map(route => route.id) });
-        await db.prepare("UPDATE fleet_devices SET status = 'active', updated_at = ? WHERE id = ?")
-          .bind(now(), id).run();
-        return { status: 'active' };
+        if (row.status !== 'active') {
+          if (!row.tunnel_id) throw Object.assign(new DeviceError('Device has no registered Tunnel', 409),
+            { activationCode: 'tunnel_pending' });
+          const profiles = deviceRoutes(row, tokens);
+          await guard();
+          const proofs = await Promise.allSettled(profiles.map(route => verifyRoute(route, request)));
+          const failed = proofs.find(result => result.status === 'rejected');
+          if (failed) throw failed.reason;
+          for (const route of profiles) await ensureMcpServer(api, account, spec, route);
+          await updatePortal(api, account, spec, { add: profiles.map(route => route.id) });
+          await db.prepare("UPDATE fleet_devices SET status = 'active', updated_at = ? WHERE id = ?")
+            .bind(now(), id).run();
+        }
+        if (wanted === undefined) return { status: 'active' };
+        return { status: 'active', servers: await reconcileServers(api, row, tokens, wanted, guard) };
       });
     },
     async enrollmentStatus(id) {
@@ -456,13 +543,17 @@ export function createDevices(env, request = fetch) {
       })();
       const stored = row.credentials ? await unwrap(row) : null;
       const { profile } = identity(spec, row);
-      const serverIds = [profile('development').id, ...(stored?.browserToken ? [profile('browser').id] : [])];
+      const configured = await registeredServers(db, id);
+      const serverIds = [profile('development').id, ...(stored?.browserToken ? [profile('browser').id] : []),
+        ...configured.map(name => identity(spec, row).server(name).id)];
       const mcpProfiles = { development: 'unverified', browser: stored?.browserToken ? 'unverified' : 'not_enabled' };
       const mcpDiagnostics = {};
+      let mcpServers = configured.map(name => ({ name, state: row.status === 'disabled' ? 'disabled' : 'unverified' }));
       if (row.status === 'disabled') mcpProfiles.development = mcpProfiles.browser = 'disabled';
       if (row.status === 'active' && stored) {
         const profiles = deviceRoutes(row, stored);
-        const proofs = await Promise.allSettled(profiles.map(route => verifyRoute(route, request)));
+        const servers = configured.map(name => serverRoute(row, stored, name));
+        const proofs = await Promise.allSettled([...profiles, ...servers].map(route => verifyRoute(route, request)));
         for (const [index, route] of profiles.entries()) {
           const proof = proofs[index];
           mcpProfiles[route.kind] = proof.status === 'fulfilled' ? 'catalog_verified' : 'unavailable';
@@ -472,10 +563,15 @@ export function createDevices(env, request = fetch) {
               ...(Number.isInteger(error?.httpStatus) && { httpStatus: error.httpStatus }) };
           }
         }
+        mcpServers = servers.map((route, index) => {
+          const proof = proofs[profiles.length + index];
+          return { name: route.name, state: proof.status === 'fulfilled' ? 'catalog_verified' : 'unavailable',
+            ...(proof.status === 'rejected' && { reason: proof.reason?.reason ?? 'check_failed' }) };
+        });
       }
       const mcp = mcpProfiles.browser === 'unavailable' ? 'unavailable' : mcpProfiles.development;
       return {
-        deviceId: id, registration: row.status, ...(await tunnelCheck), mcp, mcpProfiles,
+        deviceId: id, registration: row.status, ...(await tunnelCheck), mcp, mcpProfiles, mcpServers,
         mcpDiagnostics, checkedAt: now(),
         ...(row.status === 'disabled'
           ? { revocation: !stored || stored.revocation ? 'complete' : 'pending' }
@@ -525,7 +621,10 @@ export function createDevices(env, request = fetch) {
             await api.del(path + '/connections');
           }
         }
-        await updatePortal(api, account, spec, { remove: [row.unique_name + '-d', row.unique_name + '-b'] });
+        const servers = await registeredServers(db, id);
+        await updatePortal(api, account, spec, { remove: [row.unique_name + '-d', row.unique_name + '-b',
+          ...servers.map(name => identity(spec, row).server(name).id)] });
+        if (servers.length) await db.prepare('DELETE FROM fleet_device_servers WHERE device_id = ?').bind(id).run();
         const revoked = stored && await wrap(row, {
           activationHash: await activationDigest(stored.activationToken),
           revocation: await revokeResponse(spec.origin, id, stored.activationToken),

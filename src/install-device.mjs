@@ -1,7 +1,7 @@
 import { enrollPath } from '../cloud/device-paths.mjs';
 import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
-import { access, cp, mkdtemp, readFile, rename, rm } from 'node:fs/promises';
+import { access, chmod, cp, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -30,6 +30,19 @@ async function saveOnce(path, data) {
   }
 }
 const saveJsonOnce = (path, value) => saveOnce(path, JSON.stringify(value));
+
+// `nodrelay mcp …` for this instance, bound to its release and private root.
+async function writeLauncher(root, node, release) {
+  const cli = join(release, 'fleet', 'src', 'mcp-cli.mjs');
+  const file = join(root, windows ? 'nodrelay.cmd' : 'nodrelay');
+  const quote = value => windows ? `"${value}"` : "'" + value.replaceAll("'", "'\\''") + "'";
+  const body = windows ? `@${quote(node)} ${quote(cli)} ${quote(root)} %*\r\n`
+    : `#!/bin/sh\nexec ${quote(node)} ${quote(cli)} ${quote(root)} "$@"\n`;
+  await rm(file, { force: true });
+  await writeFile(file, body, { mode: 0o700, flag: 'wx' });
+  if (!windows) await chmod(file, 0o700);
+  return file;
+}
 
 function savedPorts(value, browser) {
   const { schema, runtime, ...portal } = value ?? {};
@@ -195,6 +208,7 @@ async function main() {
     });
   }
   await saveJsonOnce(serviceConfig, { manager, release, cloudflared: tunnel, deviceId: credentials.deviceId });
+  const launcher = await writeLauncher(root, node, release);
   console.log('4/5 启动本机后台服务…');
   const requestedAt = Date.now();
   await installService('devspace-fleet-' + fingerprint, node, [app('device-service.mjs'), serviceConfig], root);
@@ -204,6 +218,10 @@ async function main() {
   console.log('5/5 等待管理台确认设备接入…');
   const status = await waitForDeviceRegistration(join(root, 'connection-status.json'), requestedAt);
   console.log(deviceRegistrationText(status));
+  if (status.status !== 'revoked') {
+    console.log(`\n添加这台电脑上的 MCP，例如：\n  ${launcher} mcp add files -- npx -y @modelcontextprotocol/server-filesystem ${homedir()}\n` +
+      `也可以导入 Claude Desktop、Cursor 或 VS Code 的配置：${launcher} mcp import <配置文件>`);
+  }
   if (status.status === 'revoked') process.exitCode = 1;
 }
 if (process.argv[1] && pathToFileURL(process.argv[1]).href === import.meta.url) {

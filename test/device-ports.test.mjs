@@ -105,3 +105,23 @@ test('a real loopback listener counts as started and a closed port does not', as
     assert.deepEqual(await waitForLocalServices({ development: open, runtime: closed }, { timeout: 300 }), [[closed, 'Personal DevSpace']]);
   } finally { await new Promise(resolve => server.close(resolve)); }
 });
+
+test('the activation check reports local MCP names and keeps only well-formed server states from the console', async () => {
+  const { checkConnection } = await import('../src/device-connection.mjs');
+  const sent = [];
+  const request = async (_url, init) => {
+    sent.push(JSON.parse(init.body));
+    return Response.json({ status: 'active', servers: [
+      { name: 'files', status: 'registered' }, { name: 'git', status: 'pending', reason: 'http_error' },
+      { name: 'Bad', status: 'registered' }, { name: 'odd', status: 'weird' }, { name: 'xx', status: 'pending', reason: 'has spaces' },
+    ] });
+  };
+  const config = { manager: 'https://console.example.test', deviceId: 'mac-mini' };
+  const signal = new AbortController().signal;
+  const result = await checkConnection(config, 'a'.repeat(43), signal, { request, servers: ['files', 'git'] });
+  assert.deepEqual(sent[0], { deviceId: 'mac-mini', servers: ['files', 'git'] });
+  assert.deepEqual(result, { status: 'active', servers: [{ name: 'files', status: 'registered' },
+    { name: 'git', status: 'pending', reason: 'http_error' }, { name: 'xx', status: 'pending' }] });
+  await checkConnection(config, 'a'.repeat(43), signal, { request });
+  assert.deepEqual(sent[1], { deviceId: 'mac-mini' }, 'an unreadable MCP file sends no list');
+});

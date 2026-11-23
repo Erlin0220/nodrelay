@@ -128,8 +128,11 @@ test('a hosted claim routes the device Tunnel to the ports it negotiated and pin
   const claimed = await devices.claimHostedEnrollment({ ...input, ports });
   assert.deepEqual(claimed.ports, ports);
   const ingress = cf.db.tunnels.at(-1).config.ingress;
-  assert.deepEqual(ingress.filter(rule => rule.hostname).map(rule => rule.service),
-    Object.values(ports).map(port => `http://127.0.0.1:${port}`));
+  assert.deepEqual(ingress.filter(rule => rule.hostname).map(rule => [rule.path, rule.service]), [
+    ['^/devspace/mcp$', 'http://127.0.0.1:41001'],
+    ...(ports.browser ? [['^/browser/mcp$', 'http://127.0.0.1:41003']] : []),
+    ['^/mcp/[a-z][a-z0-9-]{1,23}$', 'http://127.0.0.1:41001'],
+  ]);
   assert.deepEqual(await devices.claimHostedEnrollment({ ...input, ports }), claimed);
   await assert.rejects(devices.claimHostedEnrollment(input), error => error.status === 404);
   await assert.rejects(devices.claimHostedEnrollment({ ...input, ports: { ...ports, development: 41009 } }), error => error.status === 404);
@@ -1025,4 +1028,56 @@ test('one durable code serves every hosted system until the first claim narrows 
   assert.equal((await afterClaim('linux')).status, 404, 'after a Windows claim the Linux entry no longer resolves');
   assert.equal((await afterClaim('windows')).status, 200, 'the claiming system can still recover within its window');
   assert.equal(cf.db.tunnels.length, 1);
+});
+
+test('a device registers the local MCP servers it reports, retries one that is unreachable and drops removed ones', async t => {
+  const cf = cloudFixture();
+  await deploy(cf, { ticketKey });
+  const db = await d1Fixture(t);
+  const env = { TICKETS: db, TICKET_KEY: ticketKey, FLEET_SPEC: JSON.stringify({ ...spec, policyId: cf.db.policies[0].id }),
+    PROVISIONER_TOKEN: 'generated-provisioner', RELEASE_CATALOG: JSON.stringify(catalog), APP_ORIGIN: spec.origin };
+  const devices = createDevices(env, cf.request);
+  const launched = await devices.launch('gamma', 'linux-x64');
+  const gamma = await redeemTicket(db, ticketKey, launched.ticket);
+  const host = 'https://gamma' + spec.deviceSuffix;
+  const unique = (await db.prepare('SELECT unique_name FROM fleet_devices WHERE id = ?').bind('gamma').first()).unique_name;
+  const portalIds = () => cf.db.portal.servers.map(server => server.server_id).filter(id => id.startsWith(unique));
+
+  await assert.rejects(devices.activate('gamma', gamma.activationToken, ['Bad_Name']), { status: 400 });
+  await assert.rejects(devices.activate('gamma', gamma.activationToken, ['files', 'files']), { status: 400 });
+  cf.offline.add(host + '/mcp/git');
+  const first = await devices.activate('gamma', gamma.activationToken, ['git', 'files']);
+  assert.equal(first.status, 'active');
+  assert.deepEqual(first.servers.map(({ name, status }) => [name, status]), [['files', 'registered'], ['git', 'pending']]);
+  assert.equal(first.servers[1].reason, 'http_error');
+  assert.deepEqual(portalIds(), [unique + '-d', unique + '-m-files']);
+  const ingress = cf.db.tunnels.at(-1).config.ingress;
+  assert.ok(ingress.some(rule => rule.path === '^/mcp/[a-z][a-z0-9-]{1,23}$' && rule.service === ingress[0].service),
+    'the Tunnel routes /mcp/<name> to the development adapter');
+  assert.equal(cf.db.servers.find(server => server.id === unique + '-m-files').hostname, host + '/mcp/files');
+
+  // The same list again only retries the pending server.
+  cf.offline.delete(host + '/mcp/git');
+  const writes = cf.writes.length;
+  const second = await devices.activate('gamma', gamma.activationToken, ['files', 'git']);
+  assert.deepEqual(second.servers.map(({ name, status }) => [name, status]), [['files', 'registered'], ['git', 'registered']]);
+  assert.deepEqual(portalIds(), [unique + '-d', unique + '-m-files', unique + '-m-git']);
+  assert.ok(cf.writes.length > writes);
+  const settled = cf.writes.length;
+  assert.deepEqual((await devices.activate('gamma', gamma.activationToken, ['git', 'files'])).servers.map(x => x.status), ['registered', 'registered']);
+  assert.equal(cf.writes.length, settled, 'an unchanged list makes no Cloudflare write');
+  assert.deepEqual(await devices.activate('gamma', gamma.activationToken), { status: 'active' }, 'an older device reports no list');
+
+  const status = await devices.status('gamma');
+  assert.deepEqual(status.mcpServers, [{ name: 'files', state: 'catalog_verified' }, { name: 'git', state: 'catalog_verified' }]);
+  assert.ok(status.serverIds.includes(unique + '-m-git'));
+
+  const removed = await devices.activate('gamma', gamma.activationToken, ['git']);
+  assert.deepEqual(removed.servers, [{ name: 'git', status: 'registered' }]);
+  assert.deepEqual(portalIds(), [unique + '-d', unique + '-m-git']);
+  assert.deepEqual((await devices.status('gamma')).mcpServers.map(server => server.name), ['git']);
+
+  await devices.disable('gamma');
+  assert.deepEqual(portalIds(), []);
+  assert.deepEqual((await db.prepare('SELECT COUNT(*) AS n FROM fleet_device_servers').first()).n, 0);
 });

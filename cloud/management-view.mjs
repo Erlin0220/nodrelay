@@ -369,8 +369,9 @@ export const consoleTemplate = String.raw`<!doctype html>
       <dt>最后检查</dt><dd id="checked-detail">未查询</dd>
       <dt>注册</dt><dd id="registration-detail"></dd>
       <dt>Cloudflare Tunnel</dt><dd id="tunnel-detail">未查询</dd>
-      <dt>开发工具目录</dt><dd id="mcp-detail">未查询</dd>
+      <dt>DevSpace 工具目录</dt><dd id="mcp-detail">未查询</dd>
       <dt id="browser-label" hidden>浏览器工具目录</dt><dd id="browser-detail" hidden></dd>
+      <dt id="servers-label" hidden>本机 MCP</dt><dd id="servers-detail" hidden></dd>
       <dt id="release-label" hidden>安装包版本</dt><dd id="release-detail" hidden></dd>
       <dt id="revocation-label" hidden>撤销</dt><dd id="revocation-detail" hidden></dd>
       <dt id="server-label" hidden>Portal 服务 ID</dt><dd id="server-detail" hidden></dd>
