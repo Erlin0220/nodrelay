@@ -36,7 +36,7 @@ const files = [
   'src/portal-readiness.mjs', 'src/management-release.mjs', 'src/management-onboarding.mjs', 'src/cloudflare-oauth.mjs', 'src/management-sso.mjs',
   'src/management-upgrade-baseline.mjs', 'cloud/upgrade-baseline-plan.mjs', 'cloud/upgrade-plan.mjs', 'cloud/upgrade-cloudflare.mjs', 'cloud/enrollment-bootstrap.mjs', 'cloud/upgrade-enrollment-release.mjs',
   'src/management-command-upgrade.mjs', 'src/upgrade-d1-rest.mjs', 'cloud/upgrade-artifacts.mjs',
-  'cloud/upgrade-operation.mjs', 'cloud/upgrade-journal.mjs', 'cloud/upgrade-enrollment-readiness.mjs',
+  'cloud/upgrade-operation.mjs', 'cloud/upgrade-feed-migration.mjs', 'cloud/upgrade-journal.mjs', 'cloud/upgrade-enrollment-readiness.mjs',
   'src/private-directory.mjs', 'src/setup-core.mjs', 'cloud/cloudflare.mjs', 'cloud/oauth-grant.mjs',
   'cloud/device-paths.mjs', 'cloud/install-command.mjs', 'cloud/zone-access.mjs', 'cloud/portal-client-callbacks.mjs',
   'cloud/0001_tickets.sql', 'cloud/0002_devices.sql', 'cloud/0003_portal_callback_labels.sql', 'cloud/0004_enrollment_intents.sql', 'cloud/0005_upgrade_journal.sql', 'LICENSE',
