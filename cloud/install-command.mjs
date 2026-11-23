@@ -1,5 +1,9 @@
 import { installPath, operatingSystems, publicInstallerBase } from './device-paths.mjs';
-import { devicePattern, tokenPattern } from './tickets.mjs';
+
+// Same patterns as tickets.mjs. Kept local so the macOS management kit, which
+// ships this module, needs no extra file.
+const tokenPattern = /^[A-Za-z0-9_-]{43}$/;
+const devicePattern = /^[a-z][a-z0-9-]{0,23}$/;
 
 const sh = value => "'" + value.replaceAll("'", "'\\''") + "'";
 const curlOptions = "--disable --fail --silent --show-error --location --max-redirs 5 --connect-timeout 15 --max-time 300 --retry 3 --retry-delay 2 --proto '=https' --proto-redir '=https'";

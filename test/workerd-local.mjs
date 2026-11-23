@@ -296,17 +296,26 @@ async function visitDurableEnrollment(t, dispatch, admin, form, db) {
   const copy = dialog.locator('#copy-device-command');
   const status = dialog.locator('#device-enrollment-progress');
   await launch.click();
-  await dialog.getByText('Linux', { exact: true }).click();
-  await dialog.getByRole('button', { name: '生成安装命令' }).click();
+  // One command covers every hosted system. The fixture's Windows bundle
+  // carries browser tools, so the dialog asks for that consent once.
+  await dialog.getByRole('checkbox', { name: '为此设备启用浏览器工具' }).check();
+  await dialog.getByRole('button', { name: '显示安装命令' }).click();
   await command.waitFor();
   const first = await db.prepare("SELECT id FROM enrollment_intents WHERE device_id = ? AND state = 'pending'")
     .bind(deviceId).first();
   const intentId = first?.id;
   assert.match(intentId, /^[a-f0-9-]{36}$/);
   assert.equal(await copy.isEnabled(), true);
-  assert.match(await command.textContent(), /\/device\/install\/linux\?version=/);
+  assert.match(await command.textContent(),
+    /^bash <\(curl -fsSL https:\/\/raw\.githubusercontent\.com\/Erlin0220\/nodrelay\/refs\/heads\/main\/install\.sh\) -e https:\/\/\S+ -t [A-Za-z0-9_-]{43}$/);
   assert.match(await dialog.locator('#device-command-expiration').textContent(), /不会过期/);
   assert.deepEqual(commands, { reserve: 1, create: 1, intent: 0 });
+  const systems = dialog.locator('#device-command-systems');
+  await systems.getByText('Windows', { exact: true }).click();
+  assert.match(await command.textContent(), /^powershell\.exe -NoProfile -ExecutionPolicy Bypass -Command "try \{ iwr /);
+  await systems.getByText('Linux', { exact: true }).click();
+  assert.match(await command.textContent(), /^bash </);
+  assert.deepEqual(commands, { reserve: 1, create: 1, intent: 0 }, 'switching systems sends nothing');
 
   // A separate owner session revokes the original reservation and reuses the name.
   assert.equal((await form('/admin/enrollment-intents', { deviceId, intentId, action: 'revoke' })).status, 200);
