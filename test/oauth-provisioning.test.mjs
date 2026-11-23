@@ -65,6 +65,15 @@ test('the public management client keeps the original required scopes and makes 
   } });
   assert.deepEqual(await verifyPublicManagementClient(api(approved), config, oauthClientId),
     { oauthClientId, oauthRedirect: config.oauthRedirect, visibility: 'public' });
+  const legacy = { ...config, oauthPublisher: { ...config.oauthPublisher, clientName: 'Nodrelay' } };
+  assert.equal(registrationSpec(legacy, [], { management: true }).body.client_name, body.client_name);
+  await assert.rejects(verifyPublicManagementClient(api(approved), legacy, oauthClientId), /not verified/);
+  assert.equal((await verifyPublicManagementClient(api({ ...approved, client_name: 'Nodrelay' }), legacy,
+    oauthClientId)).oauthClientId, oauthClientId);
+  await assert.rejects(verifyPublicManagementClient(api({ ...approved, client_name: 'Nodrelay',
+    redirect_uris: ['http://127.0.0.1:7118/oauth/callback'] }), legacy, oauthClientId), /not verified/);
+  await assert.rejects(verifyPublicManagementClient(api(approved), { ...legacy,
+    oauthPublisher: { ...legacy.oauthPublisher, clientName: 'Unreviewed' } }, oauthClientId), /Unknown existing/);
   for (const change of [
     { visibility: 'private' }, { client_uri_verification: { status: 'pending' } },
     { optional_scopes: undefined }, { optional_scopes: [] }, { optional_scopes: ['d1.write'] },

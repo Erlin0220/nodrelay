@@ -64,6 +64,12 @@ export async function registerOAuthClient(api, { accountId, body, runtime }, { b
 
 export async function verifyPublicManagementClient(api, config, clientId) {
   const { accountId, body } = registrationSpec(config, [], { management: true });
+  // The published client was given an explicit product name in Cloudflare.
+  // Require an exact reviewed name when requested, without altering new registration.
+  if (config.oauthPublisher?.clientName !== undefined) {
+    if (config.oauthPublisher.clientName !== 'Nodrelay') throw new Error('Unknown existing management OAuth client name');
+    body.client_name = config.oauthPublisher.clientName;
+  }
   if (!body.client_uri || !body.logo_uri || !/^[A-Za-z0-9_-]{8,128}$/.test(clientId ?? '')) {
     throw new Error('Public management OAuth verification requires a client ID and the publisher URL and logo.');
   }
