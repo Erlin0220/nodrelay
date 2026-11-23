@@ -55,3 +55,20 @@ test('an existing route with a wider destination is refused, never repaired', as
   await assert.rejects(ensureEnrollmentAccessRoutes({ api, spec }), /different or wider route/);
   assert.deepEqual(posts, []);
 });
+
+test('a command upgrade checks enrollment routes with the deployed Access scope, not the bare setup receipt', async () => {
+  const { deployedSpec } = await import('../src/management-command-upgrade.mjs');
+  const { accountScopedAccess, ...receipt } = spec;
+  void accountScopedAccess;
+  const { api, posts } = accessFixture(enrollmentUpgradeAccessPaths.filter(path => !path.endsWith('/linux')));
+  // The setup receipt never records the Access scope, which once stopped every command upgrade here.
+  await assert.rejects(ensureEnrollmentAccessRoutes({ api, spec: receipt }), /Cannot verify the existing managed deployment/);
+  const deployed = deployedSpec(receipt, JSON.stringify({ ...receipt, accountScopedAccess: true, portalId: 'fleet-x' }));
+  assert.deepEqual(deployed, spec);
+  assert.deepEqual(await ensureEnrollmentAccessRoutes({ api, spec: deployed }), ['/device/install/linux']);
+  assert.deepEqual(posts, [appsPath]);
+  for (const hosted of [JSON.stringify(receipt), JSON.stringify({ ...receipt, accountScopedAccess: true, origin: 'https://other.example.test' }),
+    JSON.stringify({ ...receipt, accountScopedAccess: true, zoneScopedAccess: true }), 'not json', undefined]) {
+    assert.throws(() => deployedSpec(receipt, hosted), /指向不同目标/);
+  }
+});

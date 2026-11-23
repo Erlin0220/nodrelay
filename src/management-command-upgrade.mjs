@@ -19,6 +19,18 @@ function bindingMap(version) {
   return map;
 }
 
+// The setup receipt does not record how Access is scoped; only the deployed
+// FLEET_SPEC does. Use the receipt's fields plus that verified scope.
+export function deployedSpec(spec, hostedText) {
+  let hosted;
+  try { hosted = JSON.parse(hostedText); } catch { /* reported below */ }
+  if (hosted?.accountScopedAccess !== true || hosted.zoneScopedAccess ||
+      !Object.entries(spec).every(([name, value]) => hosted[name] === value)) {
+    throw new Error('运行中的管理台与原回执指向不同目标，未上传或切换。');
+  }
+  return { ...spec, accountScopedAccess: true };
+}
+
 export async function upgradeManagementFromCommand({
   api, spec, databaseId, accessAudience, signed, request = fetch, ui,
 }) {
@@ -49,11 +61,7 @@ export async function upgradeManagementFromCommand({
       doBinding?.type !== 'durable_object_namespace' || !doBinding.namespace_id) {
     throw new Error('运行中的管理台、数据库或升级配置与原回执不符，未上传或切换。');
   }
-  let hosted;
-  try { hosted = JSON.parse(plain('FLEET_SPEC')); } catch {}
-  if (hosted?.accountScopedAccess !== true || !Object.entries(spec).every(([name, value]) => hosted[name] === value)) {
-    throw new Error('运行中的管理台与原回执指向不同目标，未上传或切换。');
-  }
+  const deployed = deployedSpec(spec, plain('FLEET_SPEC'));
 
   const expected = { ...target, zoneId: spec.zoneId, origin: spec.origin, ownerEmail: spec.ownerEmail,
     accessAudience, activeVersion: live.version_id, currentVersion };
@@ -86,7 +94,7 @@ export async function upgradeManagementFromCommand({
   if (release.version === currentVersion) return { currentVersion };
   ui?.note?.(`v${currentVersion} → v${release.version}。保留域名、登录、数据库和已接入设备。`, '管理台升级');
   if (release.schema === 2) {
-    const added = await ensureEnrollmentAccessRoutes({ api, spec });
+    const added = await ensureEnrollmentAccessRoutes({ api, spec: deployed });
     if (added.length) ui?.note?.(`已为设备安装补齐公开入口：${added.join('、')}。其他登录配置未改动。`, 'Access');
   }
   const execute = () => runUpgradeOperation({
@@ -94,7 +102,7 @@ export async function upgradeManagementFromCommand({
     api: createCloudflareUpgradeAdapter(api, target, { enrollment: release.schema === 2 }),
     journal,
     enrollmentApproval: release.schema === 2 ? { manifestSha256,
-      inspect: () => inspectEnrollmentUpgradeReadiness({ api, db, spec }) } : undefined,
+      inspect: () => inspectEnrollmentUpgradeReadiness({ api, db, spec: deployed }) } : undefined,
   });
   const result = ui?.wait ? await ui.wait('正在验签、上传并切换管理台版本', 'Cloudflare 已确认版本切换', execute) : await execute();
   return { confirmedVersion: result.version };

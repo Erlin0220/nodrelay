@@ -12,8 +12,9 @@ const installed = '0.1.5-preview.12', update = '0.1.5-preview.13';
 const old = '11111111-2222-3333-4444-555555555555', next = '22222222-3333-4444-5555-666666666666';
 const after = '44444444-5555-6666-7777-888888888888', webUpdate = '0.1.5-preview.14';
 const databaseId = '33333333-4444-5555-6666-777777777777', accessAudience = 'fixture-aud';
+// Shaped like the setup receipt: Access scope is recorded only in the deployed FLEET_SPEC.
 const spec = { accountId: 'a'.repeat(32), zoneId: 'b'.repeat(32), worker: 'fleet-demo-111111111111',
-  label: 'fleet-demo-111111111111', origin: 'https://fleet.example.test', ownerEmail: 'owner@example.test', accountScopedAccess: true };
+  label: 'fleet-demo-111111111111', origin: 'https://fleet.example.test', ownerEmail: 'owner@example.test' };
 const script = '/accounts/' + spec.accountId + '/workers/scripts/' + spec.worker;
 const key = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify']);
 const signed = { feed: 'https://updates.example.test/releases/', channel: 'preview',
@@ -32,7 +33,7 @@ const webRelease = await signedRelease(webUpdate, update);
 const versionNames = new Map([[old, installed], [next, update], [after, webUpdate]]);
 const config = {
   APP_ORIGIN: spec.origin, ACCESS_ISSUER:'https://fixture.cloudflareaccess.com', OWNER_EMAIL: spec.ownerEmail,
-  ACCESS_AUD:accessAudience, FLEET_SPEC: JSON.stringify(spec), FLEET_OAUTH_CLIENT_ID:'fixture-client',
+  ACCESS_AUD:accessAudience, FLEET_SPEC: JSON.stringify({ ...spec, accountScopedAccess: true }), FLEET_OAUTH_CLIENT_ID:'fixture-client',
   FLEET_OAUTH_MODE:'managed', FLEET_OAUTH_RECOVERY:'1', RELEASE_CATALOG:'{}',
   NODRELAY_UPGRADE_FEED:signed.feed, NODRELAY_UPGRADE_CHANNEL:signed.channel, NODRELAY_UPGRADE_PUBLIC_KEY:signed.publicKey,
 };
